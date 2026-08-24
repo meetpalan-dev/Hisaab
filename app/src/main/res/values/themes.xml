@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Hisaab" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#12141C</item>
+        <item name="android:windowBackground">#12141C</item>
+    </style>
+</resources>
