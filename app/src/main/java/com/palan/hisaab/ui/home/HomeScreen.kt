@@ -12,12 +12,17 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -47,7 +52,8 @@ import com.palan.hisaab.viewmodel.HomeViewModel
 @Composable
 fun HomeScreen(
     repository: HisaabRepository,
-    onOpenAccount: (Long) -> Unit
+    onOpenAccount: (Long) -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     val factory = remember {
         viewModelFactory { initializer { HomeViewModel(repository) } }
@@ -57,11 +63,27 @@ fun HomeScreen(
     val summaries by viewModel.accountSummaries.collectAsState()
     val query by viewModel.query.collectAsState()
     var showCreateDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("हिसाब", fontWeight = FontWeight.Bold) }
+                title = { Text("हिसाब", fontWeight = FontWeight.Bold) },
+                actions = {
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                    }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Import Hisab") },
+                            onClick = { showMenu = false; showImportDialog = true }
+                        )
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    }
+                }
             )
         },
         floatingActionButton = {
@@ -110,6 +132,18 @@ fun HomeScreen(
             onCreate = { name, startingBalance ->
                 viewModel.createAccount(name, startingBalance) { newId ->
                     showCreateDialog = false
+                    onOpenAccount(newId)
+                }
+            }
+        )
+    }
+
+    if (showImportDialog) {
+        ImportHisabDialog(
+            onDismiss = { showImportDialog = false },
+            onImport = { parsed ->
+                viewModel.importHisab(parsed) { newId ->
+                    showImportDialog = false
                     onOpenAccount(newId)
                 }
             }

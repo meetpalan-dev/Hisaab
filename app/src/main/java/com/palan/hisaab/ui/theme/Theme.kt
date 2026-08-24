@@ -1,11 +1,15 @@
 package com.palan.hisaab.ui.theme
 
+import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -45,11 +49,20 @@ private val HisaabLightColors = lightColorScheme(
 
 @Composable
 fun HisaabTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    useMaterialYou: Boolean = false,
+    // Default is always-dark per the app's design, regardless of system setting.
+    // Only when Material You is on do we follow the system light/dark setting,
+    // since dynamic color is meant to react to the device's whole appearance.
+    darkTheme: Boolean = if (useMaterialYou) isSystemInDarkTheme() else true,
     content: @Composable () -> Unit
 ) {
-    // Default to dark theme regardless of system setting, per product spec.
-    val colors = HisaabDarkColors
+    val context = LocalContext.current
+    val colors = when {
+        useMaterialYou && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        darkTheme -> HisaabDarkColors
+        else -> HisaabLightColors
+    }
     MaterialTheme(
         colorScheme = colors,
         typography = MaterialTheme.typography.copy(

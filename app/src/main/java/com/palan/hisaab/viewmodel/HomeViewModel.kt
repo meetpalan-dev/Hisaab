@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.palan.hisaab.data.AccountSummary
 import com.palan.hisaab.data.HisaabRepository
 import com.palan.hisaab.util.Money
+import com.palan.hisaab.util.ParsedHisab
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,13 @@ class HomeViewModel(private val repository: HisaabRepository) : ViewModel() {
             val minor = Money.rupeeStringToMinor(startingBalanceRupees)
             val id = repository.createAccount(name, minor)
             onCreated(id)
+        }
+    }
+
+    fun importHisab(parsed: ParsedHisab, onImported: (Long) -> Unit) {
+        viewModelScope.launch {
+            val id = repository.importParsedHisab(parsed)
+            onImported(id)
         }
     }
 }

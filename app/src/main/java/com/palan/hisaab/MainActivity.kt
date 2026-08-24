@@ -7,7 +7,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import com.palan.hisaab.data.HisaabSettings
 import com.palan.hisaab.ui.nav.HisaabNavHost
 import com.palan.hisaab.ui.theme.HisaabTheme
 
@@ -15,18 +18,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val repository = (application as HisaabApplication).repository
+        val app = application as HisaabApplication
         setContent {
-            HisaabApp(repository)
+            HisaabApp(app)
         }
     }
 }
 
 @Composable
-fun HisaabApp(repository: com.palan.hisaab.data.HisaabRepository) {
-    HisaabTheme {
+fun HisaabApp(app: HisaabApplication) {
+    val settings by app.settingsRepository.settings.collectAsState(initial = HisaabSettings())
+    HisaabTheme(useMaterialYou = settings.useMaterialYou) {
         Surface(modifier = Modifier.fillMaxSize()) {
-            HisaabNavHost(repository = repository)
+            HisaabNavHost(repository = app.repository, settingsRepository = app.settingsRepository)
         }
     }
 }

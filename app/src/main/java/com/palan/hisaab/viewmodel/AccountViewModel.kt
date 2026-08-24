@@ -16,9 +16,12 @@ data class AccountUiState(
     val initialBalance: Long = 0,
     val received: Long = 0,
     val spent: Long = 0,
+    val loanGiven: Long = 0,
+    val loanTaken: Long = 0,
     val transactions: List<Transaction> = emptyList()
 ) {
-    val balance: Long get() = initialBalance + received - spent
+    val balance: Long get() = initialBalance + received - spent + loanGiven - loanTaken
+    val hasLoans: Boolean get() = loanGiven != 0L || loanTaken != 0L
 }
 
 class AccountViewModel(
@@ -35,11 +38,13 @@ class AccountViewModel(
             initialBalance = summary.initialBalance,
             received = summary.received,
             spent = summary.spent,
+            loanGiven = summary.loanGiven,
+            loanTaken = summary.loanTaken,
             transactions = transactions.filter { it.type != TransactionType.INITIAL_BALANCE }
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AccountUiState())
 
-    fun addTransaction(type: TransactionType, amountMinor: Long, description: String, date: Long, category: String?) {
+    fun addTransaction(type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?) {
         viewModelScope.launch {
             repository.addTransaction(
                 Transaction(

@@ -40,6 +40,8 @@ object Money {
         val prefix = when (type) {
             com.palan.hisaab.data.entity.TransactionType.RECEIVED -> "+ "
             com.palan.hisaab.data.entity.TransactionType.SPENT -> "- "
+            com.palan.hisaab.data.entity.TransactionType.LOAN_GIVEN -> "+ "
+            com.palan.hisaab.data.entity.TransactionType.LOAN_TAKEN -> "- "
             com.palan.hisaab.data.entity.TransactionType.INITIAL_BALANCE -> ""
         }
         return prefix + format(minor)

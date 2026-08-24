@@ -12,9 +12,12 @@ data class AccountSummary(
     val account: Account,
     val initialBalance: Long,
     val received: Long,
-    val spent: Long
+    val spent: Long,
+    val loanGiven: Long = 0,
+    val loanTaken: Long = 0
 ) {
-    val balance: Long get() = initialBalance + received - spent
+    val balance: Long get() = initialBalance + received - spent + loanGiven - loanTaken
+    val hasLoans: Boolean get() = loanGiven != 0L || loanTaken != 0L
 }
 
 class HisaabRepository(
@@ -27,14 +30,16 @@ class HisaabRepository(
 
     fun searchTransactions(query: String): Flow<List<Transaction>> = transactionDao.search(query)
 
-    /** Combines the three type sums into one summary for a single account (used on Home). */
+    /** Combines the five type sums into one summary for a single account (used on Home). */
     fun observeAccountSummary(account: Account): Flow<AccountSummary> =
         combine(
             transactionDao.observeSumByType(account.id, TransactionType.INITIAL_BALANCE),
             transactionDao.observeSumByType(account.id, TransactionType.RECEIVED),
-            transactionDao.observeSumByType(account.id, TransactionType.SPENT)
-        ) { initial, received, spent ->
-            AccountSummary(account, initial, received, spent)
+            transactionDao.observeSumByType(account.id, TransactionType.SPENT),
+            transactionDao.observeSumByType(account.id, TransactionType.LOAN_GIVEN),
+            transactionDao.observeSumByType(account.id, TransactionType.LOAN_TAKEN)
+        ) { initial, received, spent, loanGiven, loanTaken ->
+            AccountSummary(account, initial, received, spent, loanGiven, loanTaken)
         }
 
     fun observeTransactions(accountId: Long): Flow<List<Transaction>> =
@@ -46,16 +51,30 @@ class HisaabRepository(
             combine(
                 transactionDao.observeSumByType(accountId, TransactionType.INITIAL_BALANCE),
                 transactionDao.observeSumByType(accountId, TransactionType.RECEIVED),
-                transactionDao.observeSumByType(accountId, TransactionType.SPENT)
-            ) { initial, received, spent -> Triple(initial, received, spent) }
+                transactionDao.observeSumByType(accountId, TransactionType.SPENT),
+                transactionDao.observeSumByType(accountId, TransactionType.LOAN_GIVEN),
+                transactionDao.observeSumByType(accountId, TransactionType.LOAN_TAKEN)
+            ) { initial, received, spent, loanGiven, loanTaken ->
+                LoanSums(initial, received, spent, loanGiven, loanTaken)
+            }
         ) { account, sums ->
             AccountSummary(
                 account = account ?: Account(id = accountId, name = ""),
-                initialBalance = sums.first,
-                received = sums.second,
-                spent = sums.third
+                initialBalance = sums.initial,
+                received = sums.received,
+                spent = sums.spent,
+                loanGiven = sums.loanGiven,
+                loanTaken = sums.loanTaken
             )
         }
+
+    private data class LoanSums(
+        val initial: Long,
+        val received: Long,
+        val spent: Long,
+        val loanGiven: Long,
+        val loanTaken: Long
+    )
 
     suspend fun createAccount(name: String, startingBalanceMinor: Long): Long {
         val id = accountDao.insert(Account(name = name.trim()))
@@ -114,5 +133,39 @@ class HisaabRepository(
 
     suspend fun renameAccount(account: Account, newName: String) {
         accountDao.update(account.copy(name = newName.trim()))
+    }
+
+    /** Recreates an account + its transactions from a parsed "Share as Text" export. Always creates a new account (never merges into an existing one), so re-importing is safe. */
+    suspend fun importParsedHisab(parsed: com.palan.hisaab.util.ParsedHisab): Long {
+        val accountId = accountDao.insert(Account(name = parsed.accountName))
+        if (parsed.initialBalanceMinor != 0L) {
+            transactionDao.insert(
+                Transaction(
+                    accountId = accountId,
+                    type = TransactionType.INITIAL_BALANCE,
+                    amountMinor = parsed.initialBalanceMinor,
+                    description = "Initial Balance",
+                    date = System.currentTimeMillis()
+                )
+            )
+        }
+        parsed.transactions.forEach { txn ->
+            val type = when {
+                txn.isLoan && txn.isSpent -> TransactionType.LOAN_TAKEN   // "-" sign -> you owe them
+                txn.isLoan && !txn.isSpent -> TransactionType.LOAN_GIVEN  // "+" sign -> they owe you
+                txn.isSpent -> TransactionType.SPENT
+                else -> TransactionType.RECEIVED
+            }
+            transactionDao.insert(
+                Transaction(
+                    accountId = accountId,
+                    type = type,
+                    amountMinor = txn.amountMinor,
+                    description = txn.description,
+                    date = txn.dateMillis
+                )
+            )
+        }
+        return accountId
     }
 }

@@ -41,6 +41,8 @@ interface TransactionDao {
           (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'INITIAL_BALANCE')
         + (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'RECEIVED')
         - (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'SPENT')
+        + (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'LOAN_GIVEN')
+        - (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'LOAN_TAKEN')
         """
     )
     fun observeBalance(accountId: Long): Flow<Long>

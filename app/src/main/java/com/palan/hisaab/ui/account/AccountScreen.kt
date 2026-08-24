@@ -1,7 +1,6 @@
 package com.palan.hisaab.ui.account
 
 import android.content.Intent
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,7 +15,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -45,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.palan.hisaab.data.HisaabRepository
+import com.palan.hisaab.data.SettingsRepository
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
 import com.palan.hisaab.ui.addtransaction.AddEditTransactionDialog
@@ -54,12 +53,14 @@ import com.palan.hisaab.util.Money
 import com.palan.hisaab.util.toDisplayString
 import com.palan.hisaab.viewmodel.AccountUiState
 import com.palan.hisaab.viewmodel.AccountViewModel
+import com.palan.hisaab.viewmodel.SettingsViewModel
 import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountScreen(
     repository: HisaabRepository,
+    settingsRepository: SettingsRepository,
     accountId: Long,
     onBack: () -> Unit
 ) {
@@ -67,6 +68,12 @@ fun AccountScreen(
         viewModelFactory { initializer { AccountViewModel(repository, accountId) } }
     }
     val viewModel: AccountViewModel = viewModel(factory = factory)
+    val settingsFactory = remember {
+        viewModelFactory { initializer { SettingsViewModel(settingsRepository) } }
+    }
+    val settingsViewModel: SettingsViewModel = viewModel(factory = settingsFactory)
+    val settings by settingsViewModel.settings.collectAsState()
+
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
@@ -113,7 +120,7 @@ fun AccountScreen(
             if (state.transactions.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "No transactions yet.\nTap + to add Received or Spent.",
+                        "No transactions yet.\nTap + to add Received, Spent, or a Loan.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
@@ -138,6 +145,7 @@ fun AccountScreen(
     if (showAddDialog) {
         AddEditTransactionDialog(
             existing = null,
+            autoFillTodayDate = settings.autoFillTodayDate,
             onDismiss = { showAddDialog = false },
             onSave = { type, amountMinor, description, date, category ->
                 viewModel.addTransaction(type, amountMinor, description, date, category)
@@ -149,6 +157,7 @@ fun AccountScreen(
     editingTransaction?.let { txn ->
         AddEditTransactionDialog(
             existing = txn,
+            autoFillTodayDate = settings.autoFillTodayDate,
             onDismiss = { editingTransaction = null },
             onSave = { type, amountMinor, description, date, category ->
                 viewModel.updateTransaction(
@@ -220,6 +229,16 @@ private fun BalanceHeader(state: AccountUiState, onEditInitialBalance: () -> Uni
                 StatColumn(label = "Received", value = Money.format(state.received), valueColor = GreenReceived)
                 StatColumn(label = "Spent", value = Money.format(state.spent), valueColor = RedSpent)
             }
+            if (state.hasLoans) {
+                androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    StatColumn(label = "They owe you (Loan Given)", value = Money.format(state.loanGiven), valueColor = GreenReceived)
+                    StatColumn(label = "You owe (Loan Taken)", value = Money.format(state.loanTaken), valueColor = RedSpent)
+                }
+            }
         }
     }
 }
@@ -234,6 +253,12 @@ private fun StatColumn(label: String, value: String, modifier: Modifier = Modifi
 
 @Composable
 private fun TransactionRow(transaction: Transaction, onClick: () -> Unit) {
+    val isPositive = transaction.type == TransactionType.RECEIVED || transaction.type == TransactionType.LOAN_GIVEN
+    val typeLabel = when (transaction.type) {
+        TransactionType.LOAN_GIVEN -> "Loan given"
+        TransactionType.LOAN_TAKEN -> "Loan taken"
+        else -> null
+    }
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -247,16 +272,14 @@ private fun TransactionRow(transaction: Transaction, onClick: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(transaction.description, fontWeight = FontWeight.Medium)
-                Text(
-                    Date(transaction.date).toDisplayString() + (transaction.category?.let { " • $it" } ?: ""),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                val dateText = transaction.date?.let { Date(it).toDisplayString() } ?: "No date"
+                val meta = listOfNotNull(dateText, typeLabel, transaction.category).joinToString(" • ")
+                Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Text(
                 text = Money.formatSigned(transaction.amountMinor, transaction.type),
                 fontWeight = FontWeight.Bold,
-                color = if (transaction.type == TransactionType.RECEIVED) GreenReceived else RedSpent
+                color = if (isPositive) GreenReceived else RedSpent
             )
         }
     }
@@ -269,13 +292,23 @@ private fun buildShareText(state: AccountUiState): String {
     sb.appendLine("Initial Balance: ${Money.format(state.initialBalance)}")
     sb.appendLine()
     sb.appendLine("Transactions:")
-    state.transactions.sortedBy { it.date }.forEach { txn ->
-        val sign = if (txn.type == TransactionType.RECEIVED) "+" else "-"
-        sb.appendLine("${Date(txn.date).toDisplayString()} - ${txn.description} - $sign ${Money.format(txn.amountMinor, withSymbol = true)}")
+    state.transactions.sortedBy { it.date ?: 0L }.forEach { txn ->
+        val sign = if (txn.type == TransactionType.RECEIVED || txn.type == TransactionType.LOAN_GIVEN) "+" else "-"
+        val dateText = txn.date?.let { Date(it).toDisplayString() } ?: "No date"
+        val typeSuffix = when (txn.type) {
+            TransactionType.LOAN_GIVEN -> " (Loan given)"
+            TransactionType.LOAN_TAKEN -> " (Loan taken)"
+            else -> ""
+        }
+        sb.appendLine("$dateText - ${txn.description}$typeSuffix - $sign ${Money.format(txn.amountMinor, withSymbol = true)}")
     }
     sb.appendLine()
     sb.appendLine("Received Total: ${Money.format(state.received)}")
     sb.appendLine("Spent Total: ${Money.format(state.spent)}")
+    if (state.hasLoans) {
+        sb.appendLine("Loan Given Total: ${Money.format(state.loanGiven)}")
+        sb.appendLine("Loan Taken Total: ${Money.format(state.loanTaken)}")
+    }
     sb.appendLine("Current Balance: ${Money.format(state.balance)}")
     return sb.toString()
 }

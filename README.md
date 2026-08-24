@@ -3,96 +3,62 @@
 A personal ledger app for Android — separate accounts/pages for people, businesses,
 and money pools, each with its own transactions and automatically calculated balance.
 
-## What's implemented (MVP, per the spec's own priority list)
+## What's implemented
 
-1. Create account (name + optional starting balance)
-2. Starting/Initial Balance — stored as a special transaction, edited (not duplicated) via the "Initial Balance" stat on the account page
-3. Add Received
-4. Add Spent
-5. Automatic balance calculation — `Current Balance = Initial Balance + Received - Spent`, always derived live from Room via `Flow`, never stored/cached
-6. Edit transaction (type, amount, description, date, category)
-7. Delete transaction, with confirmation dialog
-8. Local database — Room + SQLite, survives app restarts and phone reboots
-9. Individual account/Hisab pages
-10. Share Hisab as text (Android share sheet — WhatsApp/Telegram/SMS/Gmail etc.)
-11. Dark Material 3 UI (ink + gold palette matching the logo)
-12. Hisaab / हिसाब branding — logo + adaptive launcher icon generated and wired in
+Core MVP: create account, initial balance, add Received/Spent, automatic decimal-safe
+balance, edit/delete transaction, local Room/SQLite persistence, individual account
+pages, dark Material 3 UI, हिसाब branding as the launcher icon.
 
-Basic account search (by name) and transaction search-by-category exist at the
-DAO/repository layer (`HisaabRepository.searchAccounts` / `.searchTransactions`);
-the Home screen search box currently filters accounts. Money math uses integer
-"paise" (`Long`) end-to-end — never `Float`/`Double` — so totals can't drift from
-rounding errors, per the spec's requirement for decimal-safe amounts.
+Plus this round's additions:
 
-## Not yet built (the spec's own "add after MVP" list)
+- **Loan tracking** — two new transaction types, `Loan given` (you paid, they owe
+  you — adds to balance) and `Loan taken` (you received, you owe them — subtracts
+  from balance), kept separate from plain Received/Spent so the app stops
+  conflating "money spent for good" with "money you expect back." The balance card
+  shows a second row (They owe you / You owe) whenever an account has any loans.
+- **Import Hisab** — paste the exact text produced by "Share as Text" (from this
+  app) and it reconstructs the account and every transaction, including loan type
+  and date, via the overflow menu (⋮) on Home → "Import Hisab."
+- **Settings screen** (gear icon on Home):
+  - **Material You** toggle — matches app colors to your wallpaper on Android 12+;
+    off by default, falls back to the fixed ink/gold theme; the switch is disabled
+    with an explanatory subtitle on older Android versions.
+  - **Auto-fill today's date** toggle — when off, saving a transaction without
+    picking a date stores it with no date (shown as "No date" in the list) instead
+    of silently defaulting to today.
+- **Material 3 date picker** — replaced the native `DatePickerDialog` (which was
+  rendering as a plain light-themed system dialog, clashing with the dark app UI)
+  with Compose's own `DatePicker`, themed consistently with the rest of the app.
 
-- Share as PDF / Share as Image (text share is wired up; these need `pdf` generation
-  and a `Canvas`-drawn bitmap respectively — straightforward to add on top of the
-  same `buildShareText`-style summary once you want them)
-- JSON backup/export and restore
-- Full-text search wired into the UI (categories are already filterable at the data layer)
+## Not yet built
 
-None of this needs an architecture change — same Account/Transaction tables, same
-repository — it's additive.
-
-## Project structure
-
-Standard Android Studio / Gradle layout:
-
-```
-Hisaab/
-  app/src/main/java/com/palan/hisaab/
-    data/            Room entities, DAOs, database, repository
-    ui/               Compose screens (home, account, add/edit transaction, theme)
-    viewmodel/        HomeViewModel, AccountViewModel
-    util/             Money.kt — decimal-safe rupee formatting
-  app/src/main/res/
-    mipmap-*/         Generated हिसाब launcher icon (adaptive + legacy, all densities)
-```
+Share as PDF / Image, full backup/restore (JSON export), and a UI for searching
+transactions (currently accounts-only in the Home search box; the repository layer
+already supports transaction search).
 
 ## Building it via GitHub Actions (no Android Studio needed)
 
 A workflow is already included at `.github/workflows/build.yml`. GitHub-hosted
 runners come with the Android SDK preinstalled, so this builds a real debug APK
-in the cloud — no local Gradle wrapper or Android Studio required:
+in the cloud:
 
-1. Create a new (private or public) repo on GitHub — e.g. under `meetpalan-dev`.
-2. From inside the unzipped `Hisaab/` folder:
-   ```
-   git init
-   git add .
-   git commit -m "Initial Hisaab app"
-   git branch -M main
-   git remote add origin https://github.com/<your-username>/<repo-name>.git
-   git push -u origin main
-   ```
-3. Open the repo's **Actions** tab — the "Build Hisaab APK" workflow runs automatically on push (or trigger it manually via "Run workflow").
-4. When it finishes (green check), open the workflow run and download the `hisaab-debug-apk` artifact from the **Artifacts** section at the bottom of the run page. Unzip it to get `app-debug.apk`.
-5. Transfer that APK to your phone (or a browser download link) and install it — you'll need to allow "install unknown apps" for whatever app you use to open it, since it's not from the Play Store.
+1. Push this project to a GitHub repo (e.g. under `meetpalan-dev`).
+2. Open the repo's **Actions** tab — it runs on push, or trigger manually.
+3. Download the `hisaab-debug-apk` artifact from the finished run and install
+   `app-debug.apk` on your phone (allow "install unknown apps" for whichever app
+   opens it).
 
-This is also the best way to catch any build errors, since I couldn't compile
-the project myself in this environment — the Actions log will show the exact
-error and line if anything needs a small fix.
+If the build fails, the Actions log will show the exact file/line — that's also
+the fastest way to catch anything I couldn't verify myself, since I don't have an
+Android SDK in this environment to compile it directly.
 
 ## Building it in Android Studio (alternative)
 
-This was written and organized here, but there's no Android SDK / emulator in this
-environment to compile or run it — you'll need Android Studio (Hedgehog or newer) to
-actually build and test it:
-
-1. Unzip the project, open the `Hisaab/` folder in Android Studio.
-2. Let it sync Gradle (it'll offer to generate the Gradle wrapper on first open —
-   accept that, or point it at a local Gradle 8.7+ install).
-3. Run on a device/emulator with **minSdk 26** (Android 8.0) or newer.
-
-Because I couldn't compile it myself here, treat this as a strong first pass rather
-than a guaranteed zero-error build — if Android Studio flags anything on sync (an
-import, a Compose API that shifted between library versions), it should be a small
-fix, not a redesign. Worth a build-and-click-through before you rely on it.
+Open the `Hisaab/` folder in Android Studio (Hedgehog+), let it sync Gradle
+(it'll offer to generate the wrapper), and run on minSdk 26 (Android 8.0)+.
 
 ## The logo
 
-`हिसाब` set in Noto Sans Devanagari Black, gold-on-ink. Files are under
-`logo-assets/` in this delivery (master logo, light/dark variants, transparent
-wordmark, Play Store 512px icon) in addition to being wired into the app's
-launcher icon at every density.
+`हिसाब` set in Noto Sans Devanagari Black, gold-on-ink. Standalone files are under
+`logo-assets/` (master logo, light/dark variants, transparent wordmark, Play Store
+512px icon) in addition to being wired into the launcher icon at every density.

@@ -30,7 +30,8 @@ data class Transaction(
     val type: TransactionType,
     val amountMinor: Long,
     val description: String,
-    val date: Long,
+    /** Null when the user left the date unset and auto-fill-today is disabled in Settings. */
+    val date: Long?,
     val category: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
