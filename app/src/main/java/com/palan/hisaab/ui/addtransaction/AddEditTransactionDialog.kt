@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -40,6 +41,7 @@ val DEFAULT_CATEGORIES = listOf(
     "Payment", "Recharge", "Insurance", "Travel", "Shopping", "Bills", "Food", "Other"
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddEditTransactionDialog(
     existing: Transaction?,
