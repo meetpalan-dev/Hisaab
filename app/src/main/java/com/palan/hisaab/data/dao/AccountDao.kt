@@ -23,6 +23,10 @@ interface AccountDao {
     @Query("SELECT * FROM accounts ORDER BY name COLLATE NOCASE ASC")
     fun observeAll(): Flow<List<Account>>
 
+    /** One-shot (non-Flow) snapshot of every account, used for the Settings full-backup export. */
+    @Query("SELECT * FROM accounts ORDER BY name COLLATE NOCASE ASC")
+    suspend fun getAllOnce(): List<Account>
+
     @Query("SELECT * FROM accounts WHERE id = :id")
     suspend fun getById(id: Long): Account?
 

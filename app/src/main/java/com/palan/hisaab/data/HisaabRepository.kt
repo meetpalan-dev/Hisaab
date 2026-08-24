@@ -168,4 +168,22 @@ class HisaabRepository(
         }
         return accountId
     }
+
+    /** Builds one text file containing every account, for Settings > Export all. */
+    suspend fun exportAllAccountsText(): String {
+        val accounts = accountDao.getAllOnce()
+        val data = accounts.map { account ->
+            val txns = transactionDao.getForAccountOnce(account.id)
+            val initialBalance = txns.firstOrNull { it.type == TransactionType.INITIAL_BALANCE }?.amountMinor ?: 0L
+            val rest = txns.filter { it.type != TransactionType.INITIAL_BALANCE }
+            Triple(account.name, initialBalance, rest)
+        }
+        return com.palan.hisaab.util.HisabTextExporter.buildBackupText(data)
+    }
+
+    /** Imports every account found in a Settings > Export all backup file. Each becomes a brand-new account, same as a single-account import. Returns how many were created. */
+    suspend fun importBackup(accounts: List<com.palan.hisaab.util.ParsedHisab>): Int {
+        accounts.forEach { importParsedHisab(it) }
+        return accounts.size
+    }
 }

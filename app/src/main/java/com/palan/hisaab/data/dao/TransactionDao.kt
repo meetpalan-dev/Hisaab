@@ -24,6 +24,10 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE accountId = :accountId ORDER BY date DESC, id DESC")
     fun observeForAccount(accountId: Long): Flow<List<Transaction>>
 
+    /** One-shot (non-Flow) snapshot of every transaction for one account, used for the Settings full-backup export. */
+    @Query("SELECT * FROM transactions WHERE accountId = :accountId ORDER BY date ASC, id ASC")
+    suspend fun getForAccountOnce(accountId: Long): List<Transaction>
+
     @Query("SELECT * FROM transactions WHERE accountId = :accountId AND type = :type LIMIT 1")
     suspend fun getInitialBalance(accountId: Long, type: TransactionType = TransactionType.INITIAL_BALANCE): Transaction?
 

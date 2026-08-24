@@ -1,5 +1,7 @@
 package com.palan.hisaab.ui.account
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +24,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -59,6 +62,8 @@ import com.palan.hisaab.ui.addtransaction.AddEditTransactionDialog
 import com.palan.hisaab.ui.theme.GreenReceived
 import com.palan.hisaab.ui.theme.RedSpent
 import com.palan.hisaab.util.Money
+import com.palan.hisaab.util.HisabTextExporter
+import com.palan.hisaab.util.HisabTextImporter
 import com.palan.hisaab.util.toDisplayString
 import com.palan.hisaab.viewmodel.AccountUiState
 import com.palan.hisaab.viewmodel.AccountViewModel
@@ -73,14 +78,15 @@ fun AccountScreen(
     repository: HisaabRepository,
     settingsRepository: SettingsRepository,
     accountId: Long,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenAccount: (Long) -> Unit
 ) {
     val factory = remember {
         viewModelFactory { initializer { AccountViewModel(repository, accountId) } }
     }
     val viewModel: AccountViewModel = viewModel(factory = factory)
     val settingsFactory = remember {
-        viewModelFactory { initializer { SettingsViewModel(settingsRepository) } }
+        viewModelFactory { initializer { SettingsViewModel(settingsRepository, repository) } }
     }
     val settingsViewModel: SettingsViewModel = viewModel(factory = settingsFactory)
     val settings by settingsViewModel.settings.collectAsState()
@@ -123,6 +129,43 @@ fun AccountScreen(
 
     val visibleTransactions = state.transactions.filterNot { it.id in hiddenTransactionIds }
 
+    fun showMessage(message: String) {
+        coroutineScope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
+    val exportFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                out.write(buildShareText(state).toByteArray())
+            }
+            showMessage("Exported ${state.accountName} to file")
+        } catch (e: Exception) {
+            showMessage("Couldn't write the file")
+        }
+    }
+
+    val importFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            when {
+                text == null -> showMessage("Couldn't read that file")
+                HisabTextImporter.isFullBackup(text) -> showMessage("That's a full backup file — import it from Settings instead")
+                else -> {
+                    val parsed = HisabTextImporter.parse(text)
+                    if (parsed == null || parsed.accountName.isBlank()) {
+                        showMessage("Couldn't recognize that file's format")
+                    } else {
+                        viewModel.importHisab(parsed) { newId -> onOpenAccount(newId) }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            showMessage("Couldn't read that file")
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -151,6 +194,21 @@ fun AccountScreen(
                             text = { Text("Rename account") },
                             onClick = { showOverflowMenu = false; showRenameDialog = true }
                         )
+                        DropdownMenuItem(
+                            text = { Text("Export as text file") },
+                            onClick = {
+                                showOverflowMenu = false
+                                exportFileLauncher.launch("${state.accountName.ifBlank { "Hisab" }}.txt")
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Import from text file") },
+                            onClick = {
+                                showOverflowMenu = false
+                                importFileLauncher.launch(arrayOf("text/plain"))
+                            }
+                        )
+                        HorizontalDivider()
                         DropdownMenuItem(
                             text = { Text("Delete account", color = MaterialTheme.colorScheme.error) },
                             onClick = { showOverflowMenu = false; showDeleteAccountConfirm = true }
@@ -368,30 +426,9 @@ private fun TransactionRow(transaction: Transaction, onClick: () -> Unit) {
     }
 }
 
-private fun buildShareText(state: AccountUiState): String {
-    val sb = StringBuilder()
-    sb.appendLine(state.accountName)
-    sb.appendLine()
-    sb.appendLine("Initial Balance: ${Money.format(state.initialBalance)}")
-    sb.appendLine()
-    sb.appendLine("Transactions:")
-    state.transactions.sortedBy { it.date ?: 0L }.forEach { txn ->
-        val sign = if (txn.type == TransactionType.RECEIVED || txn.type == TransactionType.LOAN_GIVEN) "+" else "-"
-        val dateText = txn.date?.let { Date(it).toDisplayString() } ?: "No date"
-        val typeSuffix = when (txn.type) {
-            TransactionType.LOAN_GIVEN -> " (Loan given)"
-            TransactionType.LOAN_TAKEN -> " (Loan taken)"
-            else -> ""
-        }
-        sb.appendLine("$dateText - ${txn.description}$typeSuffix - $sign ${Money.format(txn.amountMinor, withSymbol = true)}")
-    }
-    sb.appendLine()
-    sb.appendLine("Received Total: ${Money.format(state.received)}")
-    sb.appendLine("Spent Total: ${Money.format(state.spent)}")
-    if (state.hasLoans) {
-        sb.appendLine("Loan Given Total: ${Money.format(state.loanGiven)}")
-        sb.appendLine("Loan Taken Total: ${Money.format(state.loanTaken)}")
-    }
-    sb.appendLine("Current Balance: ${Money.format(state.balance)}")
-    return sb.toString()
-}
+private fun buildShareText(state: AccountUiState): String =
+    HisabTextExporter.buildAccountText(
+        accountName = state.accountName,
+        initialBalanceMinor = state.initialBalance,
+        transactions = state.transactions
+    )

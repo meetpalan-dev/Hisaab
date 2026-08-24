@@ -40,11 +40,13 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
                 repository = repository,
                 settingsRepository = settingsRepository,
                 accountId = accountId,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onOpenAccount = { id -> navController.navigate(Routes.account(id)) }
             )
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(
+                repository = repository,
                 settingsRepository = settingsRepository,
                 onBack = { navController.popBackStack() }
             )

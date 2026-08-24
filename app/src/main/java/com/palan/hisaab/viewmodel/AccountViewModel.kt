@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.palan.hisaab.data.HisaabRepository
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
+import com.palan.hisaab.util.ParsedHisab
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -84,6 +85,14 @@ class AccountViewModel(
         viewModelScope.launch {
             val acc = com.palan.hisaab.data.entity.Account(id = accountId, name = uiState.value.accountName)
             repository.renameAccount(acc, newName)
+        }
+    }
+
+    /** Imports a single account exported elsewhere as a brand-new account (never merges into this one). */
+    fun importHisab(parsed: ParsedHisab, onImported: (Long) -> Unit) {
+        viewModelScope.launch {
+            val id = repository.importParsedHisab(parsed)
+            onImported(id)
         }
     }
 }

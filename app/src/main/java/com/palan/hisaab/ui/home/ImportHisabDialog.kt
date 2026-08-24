@@ -41,6 +41,10 @@ fun ImportHisabDialog(
         },
         confirmButton = {
             TextButton(onClick = {
+                if (HisabTextImporter.isFullBackup(text)) {
+                    error = "That's a full backup file — import it from Settings instead."
+                    return@TextButton
+                }
                 val parsed = HisabTextImporter.parse(text)
                 if (parsed == null || parsed.accountName.isBlank()) {
                     error = "Couldn't recognize that format."
