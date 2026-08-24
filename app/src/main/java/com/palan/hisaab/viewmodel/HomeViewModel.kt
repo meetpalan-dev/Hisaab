@@ -39,7 +39,9 @@ class HomeViewModel(private val repository: HisaabRepository) : ViewModel() {
 
     fun createAccount(name: String, startingBalanceRupees: String, onCreated: (Long) -> Unit) {
         viewModelScope.launch {
-            val minor = Money.rupeeStringToMinor(startingBalanceRupees)
+            // Falls back to 0 for anything unparsable — the dialog already validates
+            // before calling this, but never crash here regardless of caller.
+            val minor = Money.tryParseRupeesToMinor(startingBalanceRupees) ?: 0L
             val id = repository.createAccount(name, minor)
             onCreated(id)
         }

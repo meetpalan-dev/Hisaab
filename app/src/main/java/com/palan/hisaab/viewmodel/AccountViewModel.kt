@@ -78,4 +78,12 @@ class AccountViewModel(
             onDone()
         }
     }
+
+    fun renameAccount(newName: String) {
+        if (newName.isBlank()) return
+        viewModelScope.launch {
+            val acc = com.palan.hisaab.data.entity.Account(id = accountId, name = uiState.value.accountName)
+            repository.renameAccount(acc, newName)
+        }
+    }
 }

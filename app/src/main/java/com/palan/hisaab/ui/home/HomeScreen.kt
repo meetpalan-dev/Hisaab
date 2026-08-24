@@ -45,6 +45,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.palan.hisaab.data.AccountSummary
 import com.palan.hisaab.data.HisaabRepository
 import com.palan.hisaab.ui.createaccount.CreateAccountDialog
+import com.palan.hisaab.ui.theme.RedSpent
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.viewmodel.HomeViewModel
 
@@ -170,7 +171,7 @@ private fun AccountCard(summary: AccountSummary, onClick: () -> Unit) {
                 text = Money.format(summary.balance),
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                color = if (summary.balance < 0) RedSpent else MaterialTheme.colorScheme.primary
             )
         }
     }

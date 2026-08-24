@@ -15,16 +15,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -33,6 +41,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +63,8 @@ import com.palan.hisaab.util.toDisplayString
 import com.palan.hisaab.viewmodel.AccountUiState
 import com.palan.hisaab.viewmodel.AccountViewModel
 import com.palan.hisaab.viewmodel.SettingsViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,11 +87,41 @@ fun AccountScreen(
 
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
     var showAddDialog by remember { mutableStateOf(false) }
     var editingTransaction by remember { mutableStateOf<Transaction?>(null) }
-    var transactionPendingDelete by remember { mutableStateOf<Transaction?>(null) }
     var showInitialBalanceDialog by remember { mutableStateOf(false) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var showDeleteAccountConfirm by remember { mutableStateOf(false) }
+
+    // Transactions the user just deleted: hidden immediately, actually removed
+    // from the DB only once the Undo snackbar times out without being tapped.
+    var hiddenTransactionIds by remember { mutableStateOf(setOf<Long>()) }
+    val pendingDeleteJobs = remember { mutableMapOf<Long, Job>() }
+
+    fun requestDeleteTransaction(txn: Transaction) {
+        hiddenTransactionIds = hiddenTransactionIds + txn.id
+        pendingDeleteJobs[txn.id]?.cancel()
+        pendingDeleteJobs[txn.id] = coroutineScope.launch {
+            val result = snackbarHostState.showSnackbar(
+                message = "Deleted \"${txn.description}\"",
+                actionLabel = "Undo",
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                hiddenTransactionIds = hiddenTransactionIds - txn.id
+            } else {
+                viewModel.deleteTransaction(txn)
+                hiddenTransactionIds = hiddenTransactionIds - txn.id
+            }
+            pendingDeleteJobs.remove(txn.id)
+        }
+    }
+
+    val visibleTransactions = state.transactions.filterNot { it.id in hiddenTransactionIds }
 
     Scaffold(
         topBar = {
@@ -102,9 +143,23 @@ fun AccountScreen(
                     }) {
                         Icon(Icons.Filled.Share, contentDescription = "Share Hisab")
                     }
+                    IconButton(onClick = { showOverflowMenu = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                    }
+                    DropdownMenu(expanded = showOverflowMenu, onDismissRequest = { showOverflowMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Rename account") },
+                            onClick = { showOverflowMenu = false; showRenameDialog = true }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete account", color = MaterialTheme.colorScheme.error) },
+                            onClick = { showOverflowMenu = false; showDeleteAccountConfirm = true }
+                        )
+                    }
                 }
             )
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(onClick = { showAddDialog = true }) {
                 Icon(Icons.Filled.Add, contentDescription = "Add transaction")
@@ -117,7 +172,7 @@ fun AccountScreen(
                 onEditInitialBalance = { showInitialBalanceDialog = true }
             )
 
-            if (state.transactions.isEmpty()) {
+            if (visibleTransactions.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         "No transactions yet.\nTap + to add Received, Spent, or a Loan.",
@@ -130,7 +185,7 @@ fun AccountScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(state.transactions, key = { it.id }) { txn ->
+                    items(visibleTransactions, key = { it.id }) { txn ->
                         TransactionRow(
                             transaction = txn,
                             onClick = { editingTransaction = txn }
@@ -166,25 +221,53 @@ fun AccountScreen(
                 editingTransaction = null
             },
             onDelete = {
-                transactionPendingDelete = txn
                 editingTransaction = null
+                requestDeleteTransaction(txn)
             }
         )
     }
 
-    transactionPendingDelete?.let { txn ->
+    if (showRenameDialog) {
+        var renameText by remember { mutableStateOf(state.accountName) }
         AlertDialog(
-            onDismissRequest = { transactionPendingDelete = null },
-            title = { Text("Delete this transaction?") },
-            text = { Text(txn.description) },
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("Rename account") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.renameAccount(renameText.trim())
+                        showRenameDialog = false
+                    },
+                    enabled = renameText.isNotBlank()
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showDeleteAccountConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAccountConfirm = false },
+            title = { Text("Delete ${state.accountName}?") },
+            text = { Text("This permanently deletes the account and all ${state.transactions.size} transaction(s) in it. This can't be undone.") },
             confirmButton = {
                 TextButton(onClick = {
-                    viewModel.deleteTransaction(txn)
-                    transactionPendingDelete = null
+                    showDeleteAccountConfirm = false
+                    viewModel.deleteAccount(onDone = onBack)
                 }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { transactionPendingDelete = null }) { Text("Cancel") }
+                TextButton(onClick = { showDeleteAccountConfirm = false }) { Text("Cancel") }
             }
         )
     }
@@ -214,7 +297,7 @@ private fun BalanceHeader(state: AccountUiState, onEditInitialBalance: () -> Uni
                 text = Money.format(state.balance),
                 style = MaterialTheme.typography.displaySmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                color = if (state.balance < 0) RedSpent else MaterialTheme.colorScheme.primary
             )
             androidx.compose.foundation.layout.Spacer(Modifier.padding(6.dp))
             Row(
