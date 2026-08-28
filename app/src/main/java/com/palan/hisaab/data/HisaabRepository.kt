@@ -186,4 +186,31 @@ class HisaabRepository(
         accounts.forEach { importParsedHisab(it) }
         return accounts.size
     }
+
+    /**
+     * Used by Split Bill's "Add to Hisaab": finds an existing account matching
+     * [name] (case-insensitive) or creates a fresh one, then records a single
+     * loan transaction against it — [isOwedToMe]=true for LOAN_GIVEN (they owe
+     * you their share), false for LOAN_TAKEN (you owe the payer your share).
+     * Returns the account id so the caller can offer to open it.
+     */
+    suspend fun recordSplitBillShare(
+        name: String,
+        amountMinor: Long,
+        isOwedToMe: Boolean,
+        description: String
+    ): Long {
+        val trimmed = name.trim()
+        val accountId = accountDao.getByNameExact(trimmed)?.id ?: accountDao.insert(Account(name = trimmed))
+        transactionDao.insert(
+            Transaction(
+                accountId = accountId,
+                type = if (isOwedToMe) TransactionType.LOAN_GIVEN else TransactionType.LOAN_TAKEN,
+                amountMinor = amountMinor,
+                description = description,
+                date = System.currentTimeMillis()
+            )
+        )
+        return accountId
+    }
 }

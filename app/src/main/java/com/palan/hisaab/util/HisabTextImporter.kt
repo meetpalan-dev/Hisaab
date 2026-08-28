@@ -55,6 +55,7 @@ object HisabTextImporter {
     fun isFullBackup(text: String): Boolean = text.trimStart().startsWith("Hisaab Full Backup")
 
     fun parse(text: String): ParsedHisab? {
+        if (SplitBillTextFormat.isSplitBill(text)) return null
         val lines = text.lines().map { it.trimEnd() }
         if (lines.isEmpty()) return null
 

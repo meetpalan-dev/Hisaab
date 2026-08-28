@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -54,7 +55,8 @@ import com.palan.hisaab.viewmodel.HomeViewModel
 fun HomeScreen(
     repository: HisaabRepository,
     onOpenAccount: (Long) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenSplitBill: () -> Unit
 ) {
     val factory = remember {
         viewModelFactory { initializer { HomeViewModel(repository) } }
@@ -80,6 +82,9 @@ fun HomeScreen(
                             text = { Text("Import Hisab") },
                             onClick = { showMenu = false; showImportDialog = true }
                         )
+                    }
+                    IconButton(onClick = onOpenSplitBill) {
+                        Icon(Icons.Filled.CallSplit, contentDescription = "Split Bill")
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
@@ -114,6 +119,20 @@ fun HomeScreen(
                     )
                 }
             } else {
+                val totalBalance = summaries.sumOf { it.balance }
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(
+                        "Net across ${summaries.size} account(s)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        Money.format(totalBalance),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (totalBalance < 0) RedSpent else MaterialTheme.colorScheme.primary
+                    )
+                }
                 LazyColumn(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)

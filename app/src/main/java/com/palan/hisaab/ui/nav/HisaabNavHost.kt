@@ -11,11 +11,13 @@ import com.palan.hisaab.data.SettingsRepository
 import com.palan.hisaab.ui.account.AccountScreen
 import com.palan.hisaab.ui.home.HomeScreen
 import com.palan.hisaab.ui.settings.SettingsScreen
+import com.palan.hisaab.ui.splitbill.SplitBillScreen
 
 object Routes {
     const val HOME = "home"
     const val ACCOUNT = "account/{accountId}"
     const val SETTINGS = "settings"
+    const val SPLIT_BILL = "split_bill"
     fun account(id: Long) = "account/$id"
 }
 
@@ -28,7 +30,8 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
             HomeScreen(
                 repository = repository,
                 onOpenAccount = { id -> navController.navigate(Routes.account(id)) },
-                onOpenSettings = { navController.navigate(Routes.SETTINGS) }
+                onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                onOpenSplitBill = { navController.navigate(Routes.SPLIT_BILL) }
             )
         }
         composable(
@@ -48,6 +51,12 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
             SettingsScreen(
                 repository = repository,
                 settingsRepository = settingsRepository,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.SPLIT_BILL) {
+            SplitBillScreen(
+                repository = repository,
                 onBack = { navController.popBackStack() }
             )
         }

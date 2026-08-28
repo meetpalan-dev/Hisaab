@@ -30,6 +30,10 @@ interface AccountDao {
     @Query("SELECT * FROM accounts WHERE id = :id")
     suspend fun getById(id: Long): Account?
 
+    /** Case-insensitive exact-name lookup, used by Split Bill's "find or create" flow. */
+    @Query("SELECT * FROM accounts WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun getByNameExact(name: String): Account?
+
     @Query("SELECT * FROM accounts WHERE id = :id")
     fun observeById(id: Long): Flow<Account?>
 
