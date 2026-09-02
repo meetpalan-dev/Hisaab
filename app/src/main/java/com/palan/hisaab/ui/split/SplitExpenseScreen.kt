@@ -59,7 +59,9 @@ private data class Participant(
     val isSelf: Boolean = false,
     // raw editable inputs per mode; interpreted based on the active mode
     val amountText: String = "",
+    val amountLocked: Boolean = false,
     val percentText: String = "",
+    val percentLocked: Boolean = false,
     val shareCount: Int = 1
 )
 
@@ -207,10 +209,14 @@ fun SplitExpenseScreen(
                         mode = mode,
                         shareAmountMinor = shareAmounts.getOrElse(index) { 0L },
                         onAmountChange = { text ->
-                            participants = participants.toMutableList().also { it[index] = p.copy(amountText = text) }
+                            participants = participants.toMutableList().also {
+                                it[index] = p.copy(amountText = text, amountLocked = text.isNotBlank())
+                            }
                         },
                         onPercentChange = { text ->
-                            participants = participants.toMutableList().also { it[index] = p.copy(percentText = text) }
+                            participants = participants.toMutableList().also {
+                                it[index] = p.copy(percentText = text, percentLocked = text.isNotBlank())
+                            }
                         },
                         onSharesChange = { count ->
                             participants = participants.toMutableList().also { it[index] = p.copy(shareCount = count.coerceAtLeast(0)) }
@@ -280,20 +286,49 @@ private fun ParticipantRow(
 private fun computeShares(mode: SplitMode, totalMinor: Long, participants: List<Participant>): List<Long> {
     if (participants.isEmpty() || totalMinor <= 0) return emptyList()
     return when (mode) {
-        SplitMode.EVENLY -> {
-            val base = totalMinor / participants.size
-            val remainder = totalMinor - base * participants.size
-            participants.indices.map { i -> base + if (i < remainder) 1 else 0 }
+        SplitMode.EVENLY -> evenSplit(totalMinor, participants.size)
+        SplitMode.AMOUNT -> {
+            val locked = participants.map { p ->
+                if (p.amountLocked) runCatching { Money.rupeeStringToMinor(p.amountText) }.getOrDefault(0L) else null
+            }
+            distributeWithLocked(totalMinor, locked)
         }
-        SplitMode.AMOUNT -> participants.map { runCatching { Money.rupeeStringToMinor(it.amountText) }.getOrDefault(0L) }
-        SplitMode.PERCENT -> participants.map { p ->
-            val pct = p.percentText.toDoubleOrNull() ?: 0.0
-            (totalMinor * pct / 100.0).toLong()
+        SplitMode.PERCENT -> {
+            val locked = participants.map { p ->
+                if (p.percentLocked) {
+                    val pct = p.percentText.toDoubleOrNull() ?: 0.0
+                    (totalMinor * pct / 100.0).toLong()
+                } else null
+            }
+            distributeWithLocked(totalMinor, locked)
         }
         SplitMode.SHARES -> {
             val totalShares = participants.sumOf { it.shareCount }
             if (totalShares == 0) participants.map { 0L }
             else participants.map { p -> totalMinor * p.shareCount / totalShares }
         }
+    }
+}
+
+private fun evenSplit(totalMinor: Long, count: Int): List<Long> {
+    val base = totalMinor / count
+    val remainder = totalMinor - base * count
+    return (0 until count).map { i -> base + if (i < remainder) 1 else 0 }
+}
+
+/**
+ * Amounts marked locked (the user typed them) are taken as-is. Whatever's left
+ * of the total is divided evenly across the remaining (unlocked) participants —
+ * so entering "Me: ₹100" on a ₹500 bill leaves ₹400 to auto-split across
+ * everyone else, and keeps recalculating as more amounts are typed or cleared.
+ */
+private fun distributeWithLocked(totalMinor: Long, locked: List<Long?>): List<Long> {
+    val lockedSum = locked.filterNotNull().sum()
+    val unlockedIndices = locked.indices.filter { locked[it] == null }
+    val remainder = (totalMinor - lockedSum).coerceAtLeast(0L)
+    val autoShares = if (unlockedIndices.isEmpty()) emptyList() else evenSplit(remainder, unlockedIndices.size)
+    var autoIdx = 0
+    return locked.indices.map { i ->
+        locked[i] ?: autoShares[autoIdx++]
     }
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -73,7 +74,6 @@ fun HomeScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var showFabMenu by remember { mutableStateOf(false) }
 
     val exportBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
@@ -114,6 +114,9 @@ fun HomeScreen(
                             onClick = { showMenu = false; importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
                         )
                     }
+                    IconButton(onClick = onOpenSplit) {
+                        Icon(Icons.Filled.CallSplit, contentDescription = "Split Expense")
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
@@ -121,20 +124,8 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            Box {
-                FloatingActionButton(onClick = { showFabMenu = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Add")
-                }
-                DropdownMenu(expanded = showFabMenu, onDismissRequest = { showFabMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("New Account") },
-                        onClick = { showFabMenu = false; showCreateDialog = true }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Split Expense") },
-                        onClick = { showFabMenu = false; onOpenSplit() }
-                    )
-                }
+            FloatingActionButton(onClick = { showCreateDialog = true }) {
+                Icon(Icons.Filled.Add, contentDescription = "New Account")
             }
         }
     ) { padding ->

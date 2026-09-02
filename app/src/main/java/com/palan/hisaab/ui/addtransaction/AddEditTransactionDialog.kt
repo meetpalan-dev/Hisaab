@@ -66,8 +66,6 @@ fun AddEditTransactionDialog(
     }
     var category by remember { mutableStateOf(existing?.category) }
     var showDatePicker by remember { mutableStateOf(false) }
-    var amountError by remember { mutableStateOf<String?>(null) }
-    var descriptionError by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -94,24 +92,20 @@ fun AddEditTransactionDialog(
 
                 OutlinedTextField(
                     value = amountText,
-                    onValueChange = { amountText = it; amountError = null },
+                    onValueChange = { amountText = it },
                     label = { Text("Amount") },
                     placeholder = { Text("₹ 0") },
                     singleLine = true,
-                    isError = amountError != null,
-                    supportingText = amountError?.let { { Text(it) } },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
 
                 OutlinedTextField(
                     value = description,
-                    onValueChange = { description = it; descriptionError = null },
+                    onValueChange = { description = it },
                     label = { Text("Description") },
                     placeholder = { Text("What was this payment for?") },
                     singleLine = true,
-                    isError = descriptionError != null,
-                    supportingText = descriptionError?.let { { Text(it) } },
                     modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
                 )
 
@@ -154,12 +148,9 @@ fun AddEditTransactionDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    val minor = Money.tryParseRupeesToMinor(amountText)
-                    when {
-                        minor == null -> amountError = "Enter a valid amount"
-                        minor <= 0 -> amountError = "Amount must be greater than 0"
-                        description.isBlank() -> descriptionError = "Enter a description"
-                        else -> onSave(type, minor, description.trim(), date, category)
+                    val minor = Money.rupeeStringToMinor(amountText)
+                    if (minor > 0 && description.isNotBlank()) {
+                        onSave(type, minor, description.trim(), date, category)
                     }
                 }
             ) { Text("Save") }

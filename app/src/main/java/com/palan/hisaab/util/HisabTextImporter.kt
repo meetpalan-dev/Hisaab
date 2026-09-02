@@ -41,10 +41,9 @@ object HisabTextImporter {
 
     private val dateFormat = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
 
-    // "24 Aug 2026 - Loan - - ₹200"  or  "No date - Loan - + ₹200"
+    // "24 Aug 2026 - Loan - - ₹200"  or  "24 Aug 2026 - Loan - + ₹200"
     private val lineRegex = Regex(
-        """^(\d{1,2}\s+\w+\s+\d{4}|No date)\s*-\s*(.+?)\s*-\s*([+-])\s*₹?\s*([\d,]+(?:\.\d{1,2})?)\s*$""",
-        RegexOption.IGNORE_CASE
+        """^(\d{1,2}\s+\w+\s+\d{4})\s*-\s*(.+?)\s*-\s*([+-])\s*₹?\s*([\d,]+(?:\.\d{1,2})?)\s*$"""
     )
 
     fun parse(text: String): ParsedHisab? {
@@ -71,11 +70,7 @@ object HisabTextImporter {
 
                 val match = lineRegex.find(line) ?: continue
                 val (dateStr, descRaw, sign, amountStr) = match.destructured
-                val date = if (dateStr.equals("No date", ignoreCase = true)) {
-                    null
-                } else {
-                    runCatching { dateFormat.parse(dateStr)?.time }.getOrNull()
-                }
+                val date = runCatching { dateFormat.parse(dateStr)?.time }.getOrNull()
                 val minor = amountToMinor(amountStr)
                 val trimmedDesc = descRaw.trimEnd()
                 val isLoan = trimmedDesc.endsWith("(Loan given)") || trimmedDesc.endsWith("(Loan taken)") ||

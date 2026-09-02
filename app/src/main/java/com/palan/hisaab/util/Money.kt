@@ -19,22 +19,6 @@ object Money {
         return bd.movePointRight(2).toLong()
     }
 
-    /**
-     * Same as [rupeeStringToMinor] but never throws — returns null for anything
-     * that isn't a valid decimal amount (e.g. "12.3.4", "-", stray text pasted
-     * from a hardware keyboard). Use this at every UI entry point instead of
-     * the throwing version, since KeyboardType.Decimal only hints the soft
-     * keyboard and doesn't actually block invalid characters.
-     */
-    fun tryParseRupeesToMinor(input: String): Long? =
-        try {
-            rupeeStringToMinor(input)
-        } catch (e: NumberFormatException) {
-            null
-        } catch (e: ArithmeticException) {
-            null
-        }
-
     fun minorToRupeeBigDecimal(minor: Long): BigDecimal =
         BigDecimal(minor).movePointLeft(2)
 

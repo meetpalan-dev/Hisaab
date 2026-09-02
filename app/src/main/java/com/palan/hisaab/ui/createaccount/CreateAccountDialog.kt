@@ -16,7 +16,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.palan.hisaab.util.Money
 
 @Composable
 fun CreateAccountDialog(
@@ -26,7 +25,6 @@ fun CreateAccountDialog(
     var name by remember { mutableStateOf("") }
     var startingBalance by remember { mutableStateOf("") }
     var phoneNumber by remember { mutableStateOf("") }
-    var balanceError by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -43,12 +41,10 @@ fun CreateAccountDialog(
                 )
                 OutlinedTextField(
                     value = startingBalance,
-                    onValueChange = { startingBalance = it; balanceError = null },
+                    onValueChange = { startingBalance = it },
                     label = { Text("Starting balance (optional)") },
                     placeholder = { Text("₹ 0") },
                     singleLine = true,
-                    isError = balanceError != null,
-                    supportingText = balanceError?.let { { Text(it) } },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
                 )
@@ -65,14 +61,7 @@ fun CreateAccountDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = {
-                    if (name.isBlank()) return@TextButton
-                    if (startingBalance.isBlank() || Money.tryParseRupeesToMinor(startingBalance) != null) {
-                        onCreate(name, startingBalance, phoneNumber)
-                    } else {
-                        balanceError = "Enter a valid amount"
-                    }
-                },
+                onClick = { if (name.isNotBlank()) onCreate(name, startingBalance, phoneNumber) },
                 enabled = name.isNotBlank()
             ) { Text("Create") }
         },

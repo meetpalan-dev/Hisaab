@@ -24,7 +24,6 @@ fun InitialBalanceDialog(
     var amountText by remember {
         mutableStateOf(if (currentMinor == 0L) "" else Money.format(currentMinor, withSymbol = false))
     }
-    var amountError by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -32,24 +31,17 @@ fun InitialBalanceDialog(
         text = {
             OutlinedTextField(
                 value = amountText,
-                onValueChange = { amountText = it; amountError = null },
+                onValueChange = { amountText = it },
                 label = { Text("Amount") },
                 placeholder = { Text("₹ 0") },
                 singleLine = true,
-                isError = amountError != null,
-                supportingText = amountError?.let { { Text(it) } },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
         },
         confirmButton = {
             TextButton(onClick = {
-                val minor = Money.tryParseRupeesToMinor(amountText)
-                if (minor == null) {
-                    amountError = "Enter a valid amount"
-                } else {
-                    onSave(minor, System.currentTimeMillis())
-                }
+                onSave(Money.rupeeStringToMinor(amountText), System.currentTimeMillis())
             }) { Text("Save") }
         },
         dismissButton = {
