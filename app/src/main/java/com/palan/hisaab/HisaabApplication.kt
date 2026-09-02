@@ -7,8 +7,7 @@ import com.palan.hisaab.data.SettingsRepository
 
 class HisaabApplication : Application() {
     val repository: HisaabRepository by lazy {
-        val db = AppDatabase.getInstance(this)
-        HisaabRepository(db.accountDao(), db.transactionDao())
+        HisaabRepository(AppDatabase.getInstance(this))
     }
     val settingsRepository: SettingsRepository by lazy {
         SettingsRepository(this)

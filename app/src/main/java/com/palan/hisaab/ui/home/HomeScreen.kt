@@ -2,20 +2,29 @@ package com.palan.hisaab.ui.home
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CallSplit
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
@@ -23,6 +32,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,6 +42,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -49,7 +60,9 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.palan.hisaab.data.AccountSummary
 import com.palan.hisaab.data.HisaabRepository
+import com.palan.hisaab.ui.common.InitialsAvatar
 import com.palan.hisaab.ui.createaccount.CreateAccountDialog
+import com.palan.hisaab.ui.theme.Spacing
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.viewmodel.HomeViewModel
 import kotlinx.coroutines.launch
@@ -74,6 +87,7 @@ fun HomeScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var fabExpanded by remember { mutableStateOf(false) }
 
     val exportBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
@@ -96,6 +110,7 @@ fun HomeScreen(
         topBar = {
             TopAppBar(
                 title = { Text("हिसाब", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
                 actions = {
                     IconButton(onClick = { showMenu = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "More")
@@ -114,9 +129,6 @@ fun HomeScreen(
                             onClick = { showMenu = false; importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
                         )
                     }
-                    IconButton(onClick = onOpenSplit) {
-                        Icon(Icons.Filled.CallSplit, contentDescription = "Split Expense")
-                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
@@ -124,21 +136,29 @@ fun HomeScreen(
             )
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = { showCreateDialog = true }) {
-                Icon(Icons.Filled.Add, contentDescription = "New Account")
-            }
+            HomeFab(
+                expanded = fabExpanded,
+                onToggle = { fabExpanded = !fabExpanded },
+                onSplit = { fabExpanded = false; onOpenSplit() },
+                onNewAccount = { fabExpanded = false; showCreateDialog = true }
+            )
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             OutlinedTextField(
                 value = query,
                 onValueChange = viewModel::onQueryChange,
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                placeholder = { Text("Search accounts, people, categories…") },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.normal, vertical = Spacing.tight),
+                placeholder = { Text("Search accounts or people") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                colors = TextFieldDefaults.colors()
+                shape = RoundedCornerShape(28.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent
+                )
             )
 
             if (summaries.isEmpty()) {
@@ -151,8 +171,8 @@ fun HomeScreen(
                 }
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    contentPadding = PaddingValues(horizontal = Spacing.normal, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.tight)
                 ) {
                     items(summaries, key = { it.account.id }) { summary ->
                         AccountCard(summary = summary, onClick = { onOpenAccount(summary.account.id) })
@@ -188,26 +208,83 @@ fun HomeScreen(
     }
 }
 
+/**
+ * Collapsed: a single [+] FAB. Expanded: "Split Expense" and "New Account" extended
+ * FABs stack above it. Tapping the main FAB (now showing ×) or either action collapses it again.
+ */
+@Composable
+private fun HomeFab(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onSplit: () -> Unit,
+    onNewAccount: () -> Unit
+) {
+    Column(horizontalAlignment = Alignment.End) {
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            Column(horizontalAlignment = Alignment.End) {
+                ExtendedFloatingActionButton(
+                    onClick = onSplit,
+                    icon = { Icon(Icons.Filled.CallSplit, contentDescription = null) },
+                    text = { Text("Split Expense") },
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+                androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+                ExtendedFloatingActionButton(
+                    onClick = onNewAccount,
+                    icon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
+                    text = { Text("New Account") },
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                )
+                androidx.compose.foundation.layout.Spacer(Modifier.padding(6.dp))
+            }
+        }
+        FloatingActionButton(onClick = onToggle) {
+            Icon(
+                if (expanded) Icons.Filled.Close else Icons.Filled.Add,
+                contentDescription = if (expanded) "Close" else "Add"
+            )
+        }
+    }
+}
+
 @Composable
 private fun AccountCard(summary: AccountSummary, onClick: () -> Unit) {
+    val isNegative = summary.balance < 0
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = summary.account.name,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            androidx.compose.foundation.layout.Spacer(Modifier.padding(2.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            InitialsAvatar(name = summary.account.name)
+            androidx.compose.foundation.layout.Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = summary.account.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (isNegative) {
+                    Text(
+                        "You owe",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             Text(
                 text = Money.format(summary.balance),
-                style = MaterialTheme.typography.headlineSmall,
+                style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                color = if (isNegative) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
             )
         }
     }

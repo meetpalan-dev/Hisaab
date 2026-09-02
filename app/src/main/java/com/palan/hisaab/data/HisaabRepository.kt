@@ -1,12 +1,15 @@
 package com.palan.hisaab.data
 
-import com.palan.hisaab.data.dao.AccountDao
-import com.palan.hisaab.data.dao.TransactionDao
+import androidx.room.withTransaction
+import com.palan.hisaab.data.dao.OutstandingHisaab
+import com.palan.hisaab.data.dao.TargetAllocatedSum
 import com.palan.hisaab.data.entity.Account
+import com.palan.hisaab.data.entity.RepaymentAllocation
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 
 data class AccountSummary(
     val account: Account,
@@ -20,24 +23,36 @@ data class AccountSummary(
     val hasLoans: Boolean get() = loanGiven != 0L || loanTaken != 0L
 }
 
-class HisaabRepository(
-    private val accountDao: AccountDao,
-    private val transactionDao: TransactionDao
-) {
+/** One allocation the user has chosen while building a repayment: "cover ₹X of this outstanding hisaab." */
+data class RepaymentAllocationInput(val targetTransactionId: Long, val amountMinor: Long)
+
+/** What a confirmed repayment settled, for the confirmation summary. */
+data class RepaymentResult(
+    val repaymentTransactionId: Long,
+    val cleared: List<Transaction>,
+    val partiallyPaid: List<Pair<Transaction, Long>> // transaction to remaining-after
+)
+
+class HisaabRepository(private val db: AppDatabase) {
+
+    private val accountDao = db.accountDao()
+    private val transactionDao = db.transactionDao()
+    private val repaymentAllocationDao = db.repaymentAllocationDao()
+
     fun observeAccounts(): Flow<List<Account>> = accountDao.observeAll()
 
     fun searchAccounts(query: String): Flow<List<Account>> = accountDao.searchByName(query)
 
     fun searchTransactions(query: String): Flow<List<Transaction>> = transactionDao.search(query)
 
-    /** Combines the five type sums into one summary for a single account (used on Home). */
+    /** Combines the type sums into one summary for a single account (used on Home). Received/Spent exclude repayment transactions; Loan Given/Taken are net of any repayment allocations, so a repayment's balance effect flows entirely through the loan side — never double-counted. */
     fun observeAccountSummary(account: Account): Flow<AccountSummary> =
         combine(
             transactionDao.observeSumByType(account.id, TransactionType.INITIAL_BALANCE),
-            transactionDao.observeSumByType(account.id, TransactionType.RECEIVED),
-            transactionDao.observeSumByType(account.id, TransactionType.SPENT),
-            transactionDao.observeSumByType(account.id, TransactionType.LOAN_GIVEN),
-            transactionDao.observeSumByType(account.id, TransactionType.LOAN_TAKEN)
+            transactionDao.observeIncomeExpenseSum(account.id, TransactionType.RECEIVED),
+            transactionDao.observeIncomeExpenseSum(account.id, TransactionType.SPENT),
+            transactionDao.observeOutstandingLoanSum(account.id, TransactionType.LOAN_GIVEN),
+            transactionDao.observeOutstandingLoanSum(account.id, TransactionType.LOAN_TAKEN)
         ) { initial, received, spent, loanGiven, loanTaken ->
             AccountSummary(account, initial, received, spent, loanGiven, loanTaken)
         }
@@ -45,15 +60,21 @@ class HisaabRepository(
     fun observeTransactions(accountId: Long): Flow<List<Transaction>> =
         transactionDao.observeForAccount(accountId)
 
+    /** How much of each loan transaction in this account has been covered by repayment allocations so far, keyed by transaction id. Used to show "Repaid ₹X / Remaining ₹Y" on partially-paid rows. */
+    fun observeAllocatedSums(accountId: Long): Flow<Map<Long, Long>> =
+        repaymentAllocationDao.observeAllocatedSumsForAccount(accountId).map { rows: List<TargetAllocatedSum> ->
+            rows.associate { it.targetTransactionId to it.allocatedMinor }
+        }
+
     /** Live summary for one account looked up by id (for the Account/Hisab page). */
     fun observeAccountSummaryById(accountId: Long): Flow<AccountSummary> =
         accountDao.observeById(accountId).combine(
             combine(
                 transactionDao.observeSumByType(accountId, TransactionType.INITIAL_BALANCE),
-                transactionDao.observeSumByType(accountId, TransactionType.RECEIVED),
-                transactionDao.observeSumByType(accountId, TransactionType.SPENT),
-                transactionDao.observeSumByType(accountId, TransactionType.LOAN_GIVEN),
-                transactionDao.observeSumByType(accountId, TransactionType.LOAN_TAKEN)
+                transactionDao.observeIncomeExpenseSum(accountId, TransactionType.RECEIVED),
+                transactionDao.observeIncomeExpenseSum(accountId, TransactionType.SPENT),
+                transactionDao.observeOutstandingLoanSum(accountId, TransactionType.LOAN_GIVEN),
+                transactionDao.observeOutstandingLoanSum(accountId, TransactionType.LOAN_TAKEN)
             ) { initial, received, spent, loanGiven, loanTaken ->
                 LoanSums(initial, received, spent, loanGiven, loanTaken)
             }
@@ -123,13 +144,81 @@ class HisaabRepository(
         transactionDao.update(transaction.copy(updatedAt = System.currentTimeMillis()))
     }
 
+    /** Deletes a transaction. If it was a repayment, its allocations cascade-delete with it (DB foreign key), so we recompute settled/remaining on whatever loans it had covered — otherwise a fully-cleared loan could be left silently marked "Paid" for a repayment that no longer exists. If it was itself a loan transaction, its allocations cascade-delete too (harmless, the loan is gone). */
     suspend fun deleteTransaction(transaction: Transaction) {
-        transactionDao.delete(transaction)
+        db.withTransaction {
+            val affectedTargets = if (transaction.isRepayment) {
+                repaymentAllocationDao.getForRepayment(transaction.id).map { it.targetTransactionId }
+            } else emptyList()
+            transactionDao.delete(transaction)
+            affectedTargets.forEach { targetId ->
+                val target = transactionDao.getById(targetId) ?: return@forEach
+                val remaining = target.amountMinor - repaymentAllocationDao.sumForTarget(targetId)
+                if (target.settled && remaining > 0) {
+                    transactionDao.update(target.copy(settled = false, updatedAt = System.currentTimeMillis()))
+                }
+            }
+        }
     }
 
-    /** Marks a Loan Given/Loan Taken transaction paid or unpaid. Never deletes it — it stays visible in history, just drops out of the outstanding-loan totals once settled. */
+    /** Marks a Loan Given/Loan Taken transaction paid or unpaid by hand (no repayment record). Never deletes it — it stays visible in history, just drops out of the outstanding-loan totals once settled. */
     suspend fun toggleLoanSettled(transaction: Transaction) {
         transactionDao.update(transaction.copy(settled = !transaction.settled, updatedAt = System.currentTimeMillis()))
+    }
+
+    /** Outstanding loan transactions eligible to receive a repayment in [accountId]: LOAN_TAKEN if you're paying them (repayment is a SPENT), LOAN_GIVEN if they're paying you back (repayment is a RECEIVED). */
+    suspend fun getOutstandingHisaabs(accountId: Long, repaymentType: TransactionType): List<OutstandingHisaab> {
+        val targetLoanType = if (repaymentType == TransactionType.SPENT) TransactionType.LOAN_TAKEN else TransactionType.LOAN_GIVEN
+        return repaymentAllocationDao.getOutstanding(accountId, targetLoanType)
+    }
+
+    /**
+     * Records a repayment: inserts the RECEIVED/SPENT transaction (flagged isRepayment so it's
+     * excluded from normal income/expense totals) plus one RepaymentAllocation per hisaab the
+     * user chose to cover, and marks each fully-covered loan transaction settled. All-or-nothing —
+     * if anything fails, nothing is written, so a partial repayment can never leave the ledger
+     * with an allocation but no transaction (or vice versa).
+     */
+    suspend fun applyRepayment(
+        accountId: Long,
+        type: TransactionType,
+        amountMinor: Long,
+        description: String,
+        date: Long?,
+        allocations: List<RepaymentAllocationInput>
+    ): RepaymentResult = db.withTransaction {
+        val repaymentId = transactionDao.insert(
+            Transaction(
+                accountId = accountId,
+                type = type,
+                amountMinor = amountMinor,
+                description = description,
+                date = date,
+                isRepayment = true
+            )
+        )
+        val cleared = mutableListOf<Transaction>()
+        val partial = mutableListOf<Pair<Transaction, Long>>()
+        for (alloc in allocations) {
+            if (alloc.amountMinor <= 0L) continue
+            repaymentAllocationDao.insert(
+                RepaymentAllocation(
+                    repaymentTransactionId = repaymentId,
+                    targetTransactionId = alloc.targetTransactionId,
+                    allocatedAmountMinor = alloc.amountMinor
+                )
+            )
+            val target = transactionDao.getById(alloc.targetTransactionId) ?: continue
+            val totalAllocated = repaymentAllocationDao.sumForTarget(alloc.targetTransactionId)
+            val remaining = target.amountMinor - totalAllocated
+            if (remaining <= 0L) {
+                transactionDao.update(target.copy(settled = true, updatedAt = System.currentTimeMillis()))
+                cleared.add(target)
+            } else {
+                partial.add(target to remaining)
+            }
+        }
+        RepaymentResult(repaymentTransactionId = repaymentId, cleared = cleared, partiallyPaid = partial)
     }
 
     suspend fun deleteAccount(account: Account) {
@@ -147,19 +236,16 @@ class HisaabRepository(
     suspend fun getAllAccountsOnce(): List<Account> = accountDao.getAllOnce()
 
     /**
-     * Applies a split expense: for each participant (excluding "you"), logs their
-     * share as a Loan Given transaction in their account — you paid the total,
-     * so each of them owes you their share back. Participants matched to an
-     * existing account (by id) post directly to it; anyone typed as a new name
-     * gets a fresh account created for them first.
-     */
-    /**
      * Applies a split expense: your own share (isSelf) posts as a plain Spent
      * transaction into a persistent "Me" account — reused across splits, created
      * once if it doesn't exist yet. Everyone else's share posts as Loan Given
      * (you paid the total, so each of them owes you their share back).
+     * A new account for anyone typed as a new name is created here, at the moment
+     * of confirmation — not while they're just sitting in the participant list —
+     * and the whole split is one DB transaction, so a failure partway through
+     * can't leave a new account with no transaction, or vice versa.
      */
-    suspend fun applySplit(description: String, shares: List<SplitShare>, date: Long): List<Long> {
+    suspend fun applySplit(description: String, shares: List<SplitShare>, date: Long): List<Long> = db.withTransaction {
         val resultIds = mutableListOf<Long>()
         var meAccountId: Long? = null
         for (share in shares) {
@@ -179,7 +265,7 @@ class HisaabRepository(
             )
             resultIds.add(accountId)
         }
-        return resultIds
+        resultIds
     }
 
     private suspend fun getOrCreateMeAccount(): Long {
@@ -204,6 +290,7 @@ class HisaabRepository(
                 tObj.put("date", t.date ?: org.json.JSONObject.NULL)
                 tObj.put("category", t.category ?: org.json.JSONObject.NULL)
                 tObj.put("settled", t.settled)
+                tObj.put("isRepayment", t.isRepayment)
                 txnArr.put(tObj)
             }
             accObj.put("transactions", txnArr)
@@ -215,7 +302,7 @@ class HisaabRepository(
         return root.toString(2)
     }
 
-    /** Restores accounts + transactions from a backup produced by [exportAllToJson]. Always creates new accounts (never merges into existing ones), so re-importing is safe. Returns the number of accounts restored. */
+    /** Restores accounts + transactions from a backup produced by [exportAllToJson]. Always creates new accounts (never merges into existing ones), so re-importing is safe. Older backups (pre-repayment feature) simply have no "isRepayment" field, which defaults to false. Repayment allocation links themselves aren't part of the backup, so a restored repayment transaction comes back as a plain flagged transaction with its settlements already baked into each loan's "settled" state at export time — nothing is lost balance-wise. Returns the number of accounts restored. */
     suspend fun importFromJson(json: String): Int {
         val root = org.json.JSONObject(json)
         val accountsArr = root.optJSONArray("accounts") ?: return 0
@@ -238,7 +325,8 @@ class HisaabRepository(
                         description = tObj.optString("description", ""),
                         date = if (tObj.isNull("date")) null else tObj.optLong("date"),
                         category = if (tObj.isNull("category")) null else tObj.optString("category"),
-                        settled = tObj.optBoolean("settled", false)
+                        settled = tObj.optBoolean("settled", false),
+                        isRepayment = tObj.optBoolean("isRepayment", false)
                     )
                 )
             }

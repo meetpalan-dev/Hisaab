@@ -35,6 +35,8 @@ data class Transaction(
     val category: String? = null,
     /** Only meaningful for LOAN_GIVEN/LOAN_TAKEN — marks a loan as repaid without deleting it, so it drops out of the outstanding-loan totals but stays visible in history. */
     val settled: Boolean = false,
+    /** True for a RECEIVED/SPENT transaction explicitly marked "Repayment / Settle Hisaab". Its own amount is excluded from the normal received/spent totals — the balance effect instead comes entirely from the RepaymentAllocation rows it created, which reduce the outstanding amount on one or more loan transactions. */
+    val isRepayment: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 )

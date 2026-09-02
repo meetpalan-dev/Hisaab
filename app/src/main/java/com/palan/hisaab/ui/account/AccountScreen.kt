@@ -29,6 +29,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -47,19 +49,27 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.palan.hisaab.data.HisaabRepository
+import com.palan.hisaab.data.RepaymentResult
 import com.palan.hisaab.data.SettingsRepository
+import com.palan.hisaab.data.dao.OutstandingHisaab
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
 import com.palan.hisaab.ui.addtransaction.AddEditTransactionDialog
 import com.palan.hisaab.ui.theme.GreenReceived
 import com.palan.hisaab.ui.theme.RedSpent
-import com.palan.hisaab.util.Money
+import com.palan.hisaab.ui.theme.Spacing
 import com.palan.hisaab.util.HisabDocumentExporter
+import com.palan.hisaab.util.Money
 import com.palan.hisaab.util.toDisplayString
 import com.palan.hisaab.viewmodel.AccountUiState
 import com.palan.hisaab.viewmodel.AccountViewModel
 import com.palan.hisaab.viewmodel.SettingsViewModel
 import java.util.Date
+
+private enum class HistoryFilter(val label: String) { ACTIVE("Active"), ALL("All"), CLEARED("Cleared") }
+
+/** Holds a repayment that's mid-flow: amount/description entered, waiting on the user to pick which outstanding hisaab(s) it covers. */
+private data class PendingRepayment(val type: TransactionType, val amountMinor: Long, val description: String, val date: Long?)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,6 +100,18 @@ fun AccountScreen(
     var showAccountMenu by remember { mutableStateOf(false) }
     var showDeleteAccountConfirm by remember { mutableStateOf(false) }
     var showShareMenu by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf(HistoryFilter.ACTIVE) }
+
+    // Repayment flow: amount entered -> outstanding hisaabs loaded -> allocation dialog -> confirmation.
+    var pendingRepayment by remember { mutableStateOf<PendingRepayment?>(null) }
+    var outstandingForRepayment by remember { mutableStateOf<List<OutstandingHisaab>>(emptyList()) }
+    var repaymentResult by remember { mutableStateOf<RepaymentResult?>(null) }
+
+    val visibleTransactions = when (filter) {
+        HistoryFilter.ACTIVE -> state.activeTransactions
+        HistoryFilter.ALL -> state.transactions
+        HistoryFilter.CLEARED -> state.clearedTransactions
+    }
 
     Scaffold(
         topBar = {
@@ -169,22 +191,41 @@ fun AccountScreen(
                 onEditInitialBalance = { showInitialBalanceDialog = true }
             )
 
-            if (state.transactions.isEmpty()) {
+            if (state.transactions.isNotEmpty()) {
+                TabRow(selectedTabIndex = filter.ordinal) {
+                    HistoryFilter.entries.forEach { f ->
+                        Tab(
+                            selected = filter == f,
+                            onClick = { filter = f },
+                            text = { Text(f.label) }
+                        )
+                    }
+                }
+            }
+
+            if (visibleTransactions.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "No transactions yet.\nTap + to add Received, Spent, or a Loan.",
+                        text = if (state.transactions.isEmpty())
+                            "No transactions yet.\nTap + to add Received, Spent, or a Loan."
+                        else when (filter) {
+                            HistoryFilter.CLEARED -> "Nothing cleared yet."
+                            else -> "Nothing here."
+                        },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                 }
             } else {
                 LazyColumn(
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(Spacing.normal),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.tight)
                 ) {
-                    items(state.transactions, key = { it.id }) { txn ->
+                    items(visibleTransactions, key = { it.id }) { txn ->
                         TransactionRow(
                             transaction = txn,
+                            remainingMinor = state.remainingFor(txn),
+                            isPartiallyPaid = state.isPartiallyPaid(txn),
                             onClick = { editingTransaction = txn }
                         )
                     }
@@ -202,6 +243,11 @@ fun AccountScreen(
             onSave = { type, amountMinor, description, date, category ->
                 viewModel.addTransaction(type, amountMinor, description, date, category)
                 showAddDialog = false
+            },
+            onStartRepayment = { type, amountMinor, description, date ->
+                showAddDialog = false
+                pendingRepayment = PendingRepayment(type, amountMinor, description, date)
+                viewModel.loadOutstandingHisaabs(type) { outstandingForRepayment = it }
             }
         )
     }
@@ -221,9 +267,44 @@ fun AccountScreen(
                 transactionPendingDelete = txn
                 editingTransaction = null
             },
-            onToggleSettled = {
-                viewModel.toggleLoanSettled(txn)
-                editingTransaction = null
+            onToggleSettled = if (txn.type == TransactionType.LOAN_GIVEN || txn.type == TransactionType.LOAN_TAKEN) {
+                {
+                    viewModel.toggleLoanSettled(txn)
+                    editingTransaction = null
+                }
+            } else null
+        )
+    }
+
+    pendingRepayment?.let { pending ->
+        RepaymentAllocationDialog(
+            repaymentType = pending.type,
+            amountMinor = pending.amountMinor,
+            description = pending.description,
+            outstanding = outstandingForRepayment,
+            onDismiss = { pendingRepayment = null },
+            onConfirm = { allocations ->
+                viewModel.submitRepayment(pending.type, pending.amountMinor, pending.description, pending.date, allocations) { result ->
+                    repaymentResult = result
+                }
+                pendingRepayment = null
+            }
+        )
+    }
+
+    repaymentResult?.let { result ->
+        AlertDialog(
+            onDismissRequest = { repaymentResult = null },
+            title = { Text("Repayment recorded") },
+            text = {
+                Column {
+                    Text("${Money.format(result.cleared.sumOf { it.amountMinor } + result.partiallyPaid.sumOf { it.first.amountMinor - it.second })} allocated")
+                    result.cleared.forEach { Text("✓ ${it.description} cleared") }
+                    result.partiallyPaid.forEach { (t, remaining) -> Text("${t.description}: ${Money.format(remaining)} remaining") }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { repaymentResult = null }) { Text("Done") }
             }
         )
     }
@@ -293,9 +374,9 @@ fun AccountScreen(
 @Composable
 private fun BalanceHeader(state: AccountUiState, onEditInitialBalance: () -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth().padding(16.dp),
+        modifier = Modifier.fillMaxWidth().padding(Spacing.normal),
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Text("Current Balance", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -303,7 +384,7 @@ private fun BalanceHeader(state: AccountUiState, onEditInitialBalance: () -> Uni
                 text = Money.format(state.balance),
                 style = MaterialTheme.typography.displaySmall,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
+                color = if (state.balance < 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
             )
             androidx.compose.foundation.layout.Spacer(Modifier.padding(6.dp))
             Row(
@@ -341,19 +422,24 @@ private fun StatColumn(label: String, value: String, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun TransactionRow(transaction: Transaction, onClick: () -> Unit) {
+private fun TransactionRow(
+    transaction: Transaction,
+    remainingMinor: Long,
+    isPartiallyPaid: Boolean,
+    onClick: () -> Unit
+) {
     val isPositive = transaction.type == TransactionType.RECEIVED || transaction.type == TransactionType.LOAN_GIVEN
     val typeLabel = when (transaction.type) {
         TransactionType.LOAN_GIVEN -> "Loan given"
         TransactionType.LOAN_TAKEN -> "Loan taken"
-        else -> null
+        else -> if (transaction.isRepayment) "Repayment" else null
     }
     val dimmed = transaction.settled
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -368,16 +454,21 @@ private fun TransactionRow(transaction: Transaction, onClick: () -> Unit) {
                         color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
                     )
                     if (dimmed) {
-                        Text(
-                            "  •  Paid",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = GreenReceived
-                        )
+                        Text("  •  Paid", style = MaterialTheme.typography.labelSmall, color = GreenReceived)
+                    } else if (isPartiallyPaid) {
+                        Text("  •  Partially paid", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
                 val dateText = transaction.date?.let { Date(it).toDisplayString() } ?: "No date"
                 val meta = listOfNotNull(dateText, typeLabel, transaction.category).joinToString(" • ")
                 Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (isPartiallyPaid) {
+                    Text(
+                        "Remaining ${Money.format(remainingMinor)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
             Text(
                 text = Money.formatSigned(transaction.amountMinor, transaction.type),
@@ -402,7 +493,7 @@ private fun buildShareText(state: AccountUiState): String {
         val typeSuffix = when (txn.type) {
             TransactionType.LOAN_GIVEN -> if (txn.settled) " (Loan given, Paid)" else " (Loan given)"
             TransactionType.LOAN_TAKEN -> if (txn.settled) " (Loan taken, Paid)" else " (Loan taken)"
-            else -> ""
+            else -> if (txn.isRepayment) " (Repayment)" else ""
         }
         sb.appendLine("$dateText - ${txn.description}$typeSuffix - $sign ${Money.format(txn.amountMinor, withSymbol = true)}")
     }

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
@@ -14,9 +15,11 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,7 +55,9 @@ fun AddEditTransactionDialog(
     onDismiss: () -> Unit,
     onSave: (type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?) -> Unit,
     onDelete: (() -> Unit)? = null,
-    onToggleSettled: (() -> Unit)? = null
+    onToggleSettled: (() -> Unit)? = null,
+    /** When set, a new Received/Spent transaction can be marked "Repayment / Settle Hisaab" — instead of saving normally, this is invoked so the caller can open the outstanding-hisaab allocation flow. Only offered when creating a new transaction (not editing one). */
+    onStartRepayment: ((type: TransactionType, amountMinor: Long, description: String, date: Long?) -> Unit)? = null
 ) {
     var type by remember { mutableStateOf(existing?.type ?: TransactionType.SPENT) }
     var amountText by remember {
@@ -66,6 +71,9 @@ fun AddEditTransactionDialog(
     }
     var category by remember { mutableStateOf(existing?.category) }
     var showDatePicker by remember { mutableStateOf(false) }
+    var isRepayment by remember { mutableStateOf(false) }
+    val repaymentEligible = existing == null && onStartRepayment != null &&
+        (type == TransactionType.RECEIVED || type == TransactionType.SPENT)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -132,6 +140,24 @@ fun AddEditTransactionDialog(
                     }
                 }
 
+                if (repaymentEligible) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Repayment / Settle Hisaab", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (type == TransactionType.SPENT) "Pays off outstanding loans you owe" else "Marks outstanding loans owed to you as paid",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = isRepayment, onCheckedChange = { isRepayment = it })
+                    }
+                }
+
                 if (onToggleSettled != null && (type == TransactionType.LOAN_GIVEN || type == TransactionType.LOAN_TAKEN)) {
                     TextButton(onClick = onToggleSettled, modifier = Modifier.padding(top = 8.dp)) {
                         Text(if (existing?.settled == true) "Mark as unpaid" else "Mark as paid")
@@ -150,10 +176,14 @@ fun AddEditTransactionDialog(
                 onClick = {
                     val minor = Money.rupeeStringToMinor(amountText)
                     if (minor > 0 && description.isNotBlank()) {
-                        onSave(type, minor, description.trim(), date, category)
+                        if (isRepayment && repaymentEligible) {
+                            onStartRepayment?.invoke(type, minor, description.trim(), date)
+                        } else {
+                            onSave(type, minor, description.trim(), date, category)
+                        }
                     }
                 }
-            ) { Text("Save") }
+            ) { Text(if (isRepayment && repaymentEligible) "Next" else "Save") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }

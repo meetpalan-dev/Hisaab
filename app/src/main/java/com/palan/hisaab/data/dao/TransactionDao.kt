@@ -30,6 +30,10 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE accountId = :accountId AND type = :type LIMIT 1")
     suspend fun getInitialBalance(accountId: Long, type: TransactionType = TransactionType.INITIAL_BALANCE): Transaction?
 
+    @Query("SELECT * FROM transactions WHERE id = :id")
+    suspend fun getById(id: Long): Transaction?
+
+    /** Used for INITIAL_BALANCE. For RECEIVED/SPENT, use [observeIncomeExpenseSum] instead (excludes repayments). For LOAN_GIVEN/LOAN_TAKEN, use [observeOutstandingLoanSum] instead (nets out allocations). */
     @Query(
         """
         SELECT COALESCE(SUM(amountMinor), 0) FROM transactions
@@ -38,17 +42,33 @@ interface TransactionDao {
     )
     fun observeSumByType(accountId: Long, type: TransactionType): Flow<Long>
 
+    /** RECEIVED/SPENT total, excluding transactions marked as a repayment — those settle a loan instead, and are counted through [observeOutstandingLoanSum] so they aren't double-counted. */
     @Query(
         """
-        SELECT
-          (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'INITIAL_BALANCE')
-        + (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'RECEIVED')
-        - (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'SPENT')
-        + (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'LOAN_GIVEN' AND settled = 0)
-        - (SELECT COALESCE(SUM(amountMinor), 0) FROM transactions WHERE accountId = :accountId AND type = 'LOAN_TAKEN' AND settled = 0)
+        SELECT COALESCE(SUM(amountMinor), 0) FROM transactions
+        WHERE accountId = :accountId AND type = :type AND isRepayment = 0
         """
     )
-    fun observeBalance(accountId: Long): Flow<Long>
+    fun observeIncomeExpenseSum(accountId: Long, type: TransactionType): Flow<Long>
+
+    /** Outstanding LOAN_GIVEN/LOAN_TAKEN total for this account: each loan transaction's amount minus whatever repayment allocations have already covered, floored at 0, and 0 outright once manually marked settled. */
+    @Query(
+        """
+        SELECT COALESCE(SUM(
+            CASE WHEN t.settled = 1 THEN 0
+                 ELSE MAX(0, t.amountMinor - COALESCE(alloc.allocated, 0))
+            END
+        ), 0)
+        FROM transactions t
+        LEFT JOIN (
+            SELECT targetTransactionId, SUM(allocatedAmountMinor) AS allocated
+            FROM repayment_allocations
+            GROUP BY targetTransactionId
+        ) alloc ON alloc.targetTransactionId = t.id
+        WHERE t.accountId = :accountId AND t.type = :type
+        """
+    )
+    fun observeOutstandingLoanSum(accountId: Long, type: TransactionType): Flow<Long>
 
     @Query(
         """
