@@ -29,17 +29,26 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -67,6 +76,16 @@ import com.palan.hisaab.viewmodel.SettingsViewModel
 import java.util.Date
 
 private enum class HistoryFilter(val label: String) { ACTIVE("Active"), ALL("All"), CLEARED("Cleared") }
+
+private enum class SwipeDirection { NONE, SETTLE, RESTORE }
+
+/** "August 2026" for a dated transaction, or "No Date" grouped last (the transaction list is already
+ * sorted newest-date-first with nulls last, so this groupBy naturally yields months newest-first
+ * with "No Date" trailing, matching the monthly-grouping spec). */
+private fun monthGroupLabel(dateMillis: Long?): String {
+    if (dateMillis == null) return "No Date"
+    return java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault()).format(Date(dateMillis))
+}
 
 /** Holds a repayment that's mid-flow: amount/description entered, waiting on the user to pick which outstanding hisaab(s) it covers. */
 private data class PendingRepayment(val type: TransactionType, val amountMinor: Long, val description: String, val date: Long?)
@@ -107,13 +126,39 @@ fun AccountScreen(
     var outstandingForRepayment by remember { mutableStateOf<List<OutstandingHisaab>>(emptyList()) }
     var repaymentResult by remember { mutableStateOf<RepaymentResult?>(null) }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Quick manual settlement (swipe gesture): applies the change immediately, then offers
+    // a brief Undo via snackbar that flips it straight back — never deletes the transaction.
+    fun handleQuickSettle(txn: Transaction, newSettled: Boolean) {
+        viewModel.setSettled(txn, newSettled)
+        coroutineScope.launch {
+            val message = if (newSettled) "Marked \"${txn.description}\" as settled" else "Restored \"${txn.description}\" to active"
+            val result = snackbarHostState.showSnackbar(message, actionLabel = "Undo", duration = SnackbarDuration.Short)
+            if (result == SnackbarResult.ActionPerformed) {
+                viewModel.setSettled(txn, !newSettled)
+            }
+        }
+    }
+
     val visibleTransactions = when (filter) {
         HistoryFilter.ACTIVE -> state.activeTransactions
         HistoryFilter.ALL -> state.transactions
         HistoryFilter.CLEARED -> state.clearedTransactions
     }
+    // Swipe RIGHT in Active settles a transaction; swipe LEFT in Cleared restores it. All has no swipe.
+    val swipeDirection = when (filter) {
+        HistoryFilter.ACTIVE -> SwipeDirection.SETTLE
+        HistoryFilter.CLEARED -> SwipeDirection.RESTORE
+        HistoryFilter.ALL -> SwipeDirection.NONE
+    }
+    val groupedTransactions = remember(visibleTransactions) {
+        visibleTransactions.groupBy { monthGroupLabel(it.date) }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text(state.accountName.ifBlank { "…" }, fontWeight = FontWeight.SemiBold) },
@@ -221,13 +266,26 @@ fun AccountScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(Spacing.normal),
                     verticalArrangement = Arrangement.spacedBy(Spacing.tight)
                 ) {
-                    items(visibleTransactions, key = { it.id }) { txn ->
-                        TransactionRow(
-                            transaction = txn,
-                            remainingMinor = state.remainingFor(txn),
-                            isPartiallyPaid = state.isPartiallyPaid(txn),
-                            onClick = { editingTransaction = txn }
-                        )
+                    groupedTransactions.forEach { (month, txnsInMonth) ->
+                        item(key = "header_$month") {
+                            Text(
+                                month,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                            )
+                        }
+                        items(txnsInMonth, key = { it.id }) { txn ->
+                            SwipeableTransactionRow(
+                                transaction = txn,
+                                remainingMinor = state.remainingFor(txn),
+                                isPartiallyPaid = state.isPartiallyPaid(txn),
+                                swipeDirection = swipeDirection,
+                                onClick = { editingTransaction = txn },
+                                onSwipeAction = { newSettled -> handleQuickSettle(txn, newSettled) }
+                            )
+                        }
                     }
                     item { androidx.compose.foundation.layout.Spacer(Modifier.padding(40.dp)) }
                 }
@@ -267,9 +325,9 @@ fun AccountScreen(
                 transactionPendingDelete = txn
                 editingTransaction = null
             },
-            onToggleSettled = if (txn.type == TransactionType.LOAN_GIVEN || txn.type == TransactionType.LOAN_TAKEN) {
+            onToggleSettled = if (txn.type != TransactionType.INITIAL_BALANCE) {
                 {
-                    viewModel.toggleLoanSettled(txn)
+                    viewModel.toggleSettled(txn)
                     editingTransaction = null
                 }
             } else null
@@ -421,6 +479,59 @@ private fun StatColumn(label: String, value: String, modifier: Modifier = Modifi
     }
 }
 
+/**
+ * Wraps [TransactionRow] with a swipe-to-settle (Active tab) or swipe-to-restore (Cleared tab)
+ * gesture. The swipe always snaps back after firing [onSwipeAction] — the row then disappears
+ * on its own once the DB update flows back through the account's transaction list for this tab,
+ * rather than the dismiss animation trying to remove it itself. No transaction is ever deleted.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeableTransactionRow(
+    transaction: Transaction,
+    remainingMinor: Long,
+    isPartiallyPaid: Boolean,
+    swipeDirection: SwipeDirection,
+    onClick: () -> Unit,
+    onSwipeAction: (newSettled: Boolean) -> Unit
+) {
+    if (swipeDirection == SwipeDirection.NONE) {
+        TransactionRow(transaction, remainingMinor, isPartiallyPaid, onClick)
+        return
+    }
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when {
+                value == SwipeToDismissBoxValue.StartToEnd && swipeDirection == SwipeDirection.SETTLE ->
+                    onSwipeAction(true)
+                value == SwipeToDismissBoxValue.EndToStart && swipeDirection == SwipeDirection.RESTORE ->
+                    onSwipeAction(false)
+            }
+            false // always snap back; the item leaves the list once the underlying data changes
+        }
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = swipeDirection == SwipeDirection.SETTLE,
+        enableDismissFromEndToStart = swipeDirection == SwipeDirection.RESTORE,
+        backgroundContent = {
+            val isSettle = swipeDirection == SwipeDirection.SETTLE
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                contentAlignment = if (isSettle) Alignment.CenterStart else Alignment.CenterEnd
+            ) {
+                Text(
+                    if (isSettle) "Settle" else "Restore",
+                    color = if (isSettle) GreenReceived else MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    ) {
+        TransactionRow(transaction, remainingMinor, isPartiallyPaid, onClick)
+    }
+}
+
 @Composable
 private fun TransactionRow(
     transaction: Transaction,
@@ -454,7 +565,7 @@ private fun TransactionRow(
                         color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface
                     )
                     if (dimmed) {
-                        Text("  •  Paid", style = MaterialTheme.typography.labelSmall, color = GreenReceived)
+                        Text("  •  Cleared", style = MaterialTheme.typography.labelSmall, color = GreenReceived)
                     } else if (isPartiallyPaid) {
                         Text("  •  Partially paid", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }

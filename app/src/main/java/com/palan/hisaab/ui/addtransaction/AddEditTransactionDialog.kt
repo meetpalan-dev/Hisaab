@@ -35,16 +35,19 @@ import com.palan.hisaab.util.toDisplayString
 import java.util.Date
 
 val DEFAULT_CATEGORIES = listOf(
-    "Payment", "Recharge", "Insurance", "Travel", "Shopping", "Bills", "Food", "Other"
+    "Payment", "Food", "Shopping", "Recharge", "Bills", "Insurance", "Travel", "Loan", "Other"
 )
 
 private data class TypeOption(val type: TransactionType, val label: String)
 
+// Loan Taken is no longer offered for new transactions — a "received money that's a loan"
+// is now just Received, optionally tagged with the "Loan" category. It's appended back into
+// the picker (further down) only when editing a transaction that's already that legacy type,
+// so old data stays fully editable without reintroducing the type for new entries.
 private val TYPE_OPTIONS = listOf(
     TypeOption(TransactionType.RECEIVED, "Received"),
     TypeOption(TransactionType.SPENT, "Spent"),
-    TypeOption(TransactionType.LOAN_GIVEN, "Loan given (they owe you)"),
-    TypeOption(TransactionType.LOAN_TAKEN, "Loan taken (you owe them)")
+    TypeOption(TransactionType.LOAN_GIVEN, "Loan Given")
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,6 +77,12 @@ fun AddEditTransactionDialog(
     var isRepayment by remember { mutableStateOf(false) }
     val repaymentEligible = existing == null && onStartRepayment != null &&
         (type == TransactionType.RECEIVED || type == TransactionType.SPENT)
+    // If editing an existing legacy Loan Taken transaction, keep it selectable so
+    // its type doesn't silently change out from under the user — just don't offer
+    // it as a choice when adding something new.
+    val typeOptions = if (existing?.type == TransactionType.LOAN_TAKEN) {
+        TYPE_OPTIONS + TypeOption(TransactionType.LOAN_TAKEN, "Loan Taken (legacy)")
+    } else TYPE_OPTIONS
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -89,7 +98,7 @@ fun AddEditTransactionDialog(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
                 ) {
-                    items(TYPE_OPTIONS) { option ->
+                    items(typeOptions) { option ->
                         FilterChip(
                             selected = type == option.type,
                             onClick = { type = option.type },
@@ -149,7 +158,7 @@ fun AddEditTransactionDialog(
                         Column {
                             Text("Repayment / Settle Hisaab", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                if (type == TransactionType.SPENT) "Pays off outstanding loans you owe" else "Marks outstanding loans owed to you as paid",
+                                if (type == TransactionType.SPENT) "Pays off an outstanding hisaab you owe" else "Settles an outstanding hisaab owed to you",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -158,9 +167,9 @@ fun AddEditTransactionDialog(
                     }
                 }
 
-                if (onToggleSettled != null && (type == TransactionType.LOAN_GIVEN || type == TransactionType.LOAN_TAKEN)) {
+                if (onToggleSettled != null) {
                     TextButton(onClick = onToggleSettled, modifier = Modifier.padding(top = 8.dp)) {
-                        Text(if (existing?.settled == true) "Mark as unpaid" else "Mark as paid")
+                        Text(if (existing?.settled == true) "Restore to Active" else "Mark as Settled")
                     }
                 }
 

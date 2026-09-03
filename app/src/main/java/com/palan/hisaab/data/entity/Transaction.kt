@@ -33,7 +33,7 @@ data class Transaction(
     /** Null when the user left the date unset and auto-fill-today is disabled in Settings. */
     val date: Long?,
     val category: String? = null,
-    /** Only meaningful for LOAN_GIVEN/LOAN_TAKEN — marks a loan as repaid without deleting it, so it drops out of the outstanding-loan totals but stays visible in history. */
+    /** Active/Cleared status — false = Active (still outstanding), true = Cleared/settled. Applies to every transaction (via swipe gesture, the Edit screen's Mark as Settled button, or automatically once a repayment allocation fully covers it). Never deletes the transaction; it stays visible in the All tab and in history either way. */
     val settled: Boolean = false,
     /** True for a RECEIVED/SPENT transaction explicitly marked "Repayment / Settle Hisaab". Its own amount is excluded from the normal received/spent totals — the balance effect instead comes entirely from the RepaymentAllocation rows it created, which reduce the outstanding amount on one or more loan transactions. */
     val isRepayment: Boolean = false,

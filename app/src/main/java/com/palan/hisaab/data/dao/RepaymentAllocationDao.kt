@@ -41,7 +41,15 @@ interface RepaymentAllocationDao {
     @Query("SELECT COALESCE(SUM(allocatedAmountMinor), 0) FROM repayment_allocations WHERE targetTransactionId = :targetTransactionId")
     suspend fun sumForTarget(targetTransactionId: Long): Long
 
-    /** Every loan transaction of [type] in this account that still has money outstanding — i.e. not manually settled and not fully covered by allocations yet. Used to build the repayment-allocation picker. */
+    /**
+     * Every transaction of any type in [types] in this account that still has money
+     * outstanding — i.e. not manually settled/cleared and not fully covered by
+     * repayment allocations yet. Used to build the repayment-allocation picker.
+     * [types] lets a repayment match transactions in *either* direction it's eligible
+     * for (e.g. a Spent-repayment can settle an outstanding Received transaction or a
+     * legacy Loan Taken one) — a single fixed type here was the bug that made the
+     * allocation screen show "nothing outstanding" even when eligible hisaabs existed.
+     */
     @Query(
         """
         SELECT t.*, (t.amountMinor - COALESCE(alloc.allocated, 0)) AS remainingMinor
@@ -51,12 +59,12 @@ interface RepaymentAllocationDao {
             FROM repayment_allocations
             GROUP BY targetTransactionId
         ) alloc ON alloc.targetTransactionId = t.id
-        WHERE t.accountId = :accountId AND t.type = :type AND t.settled = 0
+        WHERE t.accountId = :accountId AND t.type IN (:types) AND t.settled = 0 AND t.isRepayment = 0
           AND (t.amountMinor - COALESCE(alloc.allocated, 0)) > 0
         ORDER BY t.date ASC, t.id ASC
         """
     )
-    suspend fun getOutstanding(accountId: Long, type: com.palan.hisaab.data.entity.TransactionType): List<OutstandingHisaab>
+    suspend fun getOutstanding(accountId: Long, types: List<com.palan.hisaab.data.entity.TransactionType>): List<OutstandingHisaab>
 
     /** Live map (as a list of rows) of how much of each loan transaction in this account has been allocated against so far — used to render "Repaid ₹X / Remaining ₹Y" on partially-paid rows. */
     @Query(

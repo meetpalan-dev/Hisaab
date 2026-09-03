@@ -6,6 +6,11 @@ enum class TransactionType {
     INITIAL_BALANCE,
     /** You gave money/goods to them — they owe you. Increases balance (a receivable). */
     LOAN_GIVEN,
-    /** You received money/goods from them — you owe them. Decreases balance (a liability). */
+    /**
+     * Legacy type, no longer offered when adding a new transaction — kept only so
+     * existing data (and old text-export imports) keep working. A "received money
+     * that's a loan" is now just a normal RECEIVED transaction, optionally tagged
+     * with the "Loan" category. You owed them; decreases balance (a liability).
+     */
     LOAN_TAKEN
 }

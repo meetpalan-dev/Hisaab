@@ -161,15 +161,35 @@ class HisaabRepository(private val db: AppDatabase) {
         }
     }
 
-    /** Marks a Loan Given/Loan Taken transaction paid or unpaid by hand (no repayment record). Never deletes it — it stays visible in history, just drops out of the outstanding-loan totals once settled. */
-    suspend fun toggleLoanSettled(transaction: Transaction) {
-        transactionDao.update(transaction.copy(settled = !transaction.settled, updatedAt = System.currentTimeMillis()))
+    /**
+     * Marks any transaction Settled/Cleared or restores it to Active by hand — this is
+     * the "quick manual settlement" swipe action, and also the button behind it on the
+     * Edit Transaction screen. Never deletes it — it stays visible in history and in
+     * the All tab either way, it just moves between the Active and Cleared tabs, and
+     * (for a loan) drops out of the outstanding-loan totals once settled.
+     */
+    suspend fun toggleSettled(transaction: Transaction) = setSettled(transaction, !transaction.settled)
+
+    /** Sets a transaction's Active/Cleared status explicitly — used by the swipe gesture and its Undo, where flipping relative to a possibly-stale [Transaction] snapshot would be unreliable. A no-op if it's already in the requested state. */
+    suspend fun setSettled(transaction: Transaction, settled: Boolean) {
+        if (transaction.settled == settled) return
+        transactionDao.update(transaction.copy(settled = settled, updatedAt = System.currentTimeMillis()))
     }
 
-    /** Outstanding loan transactions eligible to receive a repayment in [accountId]: LOAN_TAKEN if you're paying them (repayment is a SPENT), LOAN_GIVEN if they're paying you back (repayment is a RECEIVED). */
+    /**
+     * Outstanding transactions eligible to be covered by a repayment of [repaymentType] in
+     * [accountId], based on transaction direction:
+     *  - A SPENT repayment (you're paying money out) settles outstanding RECEIVED transactions
+     *    (money that came in and is still owed back) or legacy LOAN_TAKEN ones.
+     *  - A RECEIVED repayment (money is coming back to you) settles outstanding SPENT
+     *    transactions (money that went out and is still owed to you) or LOAN_GIVEN ones.
+     */
     suspend fun getOutstandingHisaabs(accountId: Long, repaymentType: TransactionType): List<OutstandingHisaab> {
-        val targetLoanType = if (repaymentType == TransactionType.SPENT) TransactionType.LOAN_TAKEN else TransactionType.LOAN_GIVEN
-        return repaymentAllocationDao.getOutstanding(accountId, targetLoanType)
+        val targetTypes = if (repaymentType == TransactionType.SPENT)
+            listOf(TransactionType.RECEIVED, TransactionType.LOAN_TAKEN)
+        else
+            listOf(TransactionType.SPENT, TransactionType.LOAN_GIVEN)
+        return repaymentAllocationDao.getOutstanding(accountId, targetTypes)
     }
 
     /**

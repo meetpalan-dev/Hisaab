@@ -30,22 +30,27 @@ data class AccountUiState(
     val balance: Long get() = initialBalance + received - spent + loanGiven - loanTaken
     val hasLoans: Boolean get() = loanGiven != 0L || loanTaken != 0L
 
-    /** How much of a loan transaction is still unpaid — 0 for non-loan transactions and for fully-settled ones. */
+    /**
+     * How much of a transaction is still unpaid via detailed repayment allocations — 0 for
+     * a repayment transaction itself and for fully-settled ones. Applies to any Received,
+     * Spent, Loan Given, or (legacy) Loan Taken transaction, since any of them can now be
+     * the target of a "Repayment / Settle Hisaab" allocation, not just loans.
+     */
     fun remainingFor(t: Transaction): Long {
-        if (t.type != TransactionType.LOAN_GIVEN && t.type != TransactionType.LOAN_TAKEN) return 0L
+        if (t.isRepayment || t.type == TransactionType.INITIAL_BALANCE) return 0L
         if (t.settled) return 0L
         val allocated = allocatedByTransactionId[t.id] ?: 0L
         return (t.amountMinor - allocated).coerceAtLeast(0L)
     }
 
-    /** True once some (but not all) of a loan transaction has been repaid. */
+    /** True once some (but not all) of a transaction's amount has been repaid via allocations. */
     fun isPartiallyPaid(t: Transaction): Boolean {
-        if (t.type != TransactionType.LOAN_GIVEN && t.type != TransactionType.LOAN_TAKEN) return false
+        if (t.isRepayment || t.type == TransactionType.INITIAL_BALANCE) return false
         val allocated = allocatedByTransactionId[t.id] ?: 0L
         return !t.settled && allocated > 0L && allocated < t.amountMinor
     }
 
-    /** Active = not a fully-cleared loan. Cleared = settled loan. Everything else (Received/Spent/Repayments/Initial Balance) counts as active either way. */
+    /** Active = outstanding, not yet cleared. Cleared = manually or fully settled. Applies uniformly to every transaction type. */
     val activeTransactions: List<Transaction> get() = transactions.filter { !it.settled }
     val clearedTransactions: List<Transaction> get() = transactions.filter { it.settled }
 }
@@ -96,11 +101,17 @@ class AccountViewModel(
         viewModelScope.launch { repository.deleteTransaction(transaction) }
     }
 
-    fun toggleLoanSettled(transaction: Transaction) {
-        viewModelScope.launch { repository.toggleLoanSettled(transaction) }
+    /** Toggles any transaction between Active and Cleared — used by the Edit Transaction button. */
+    fun toggleSettled(transaction: Transaction) {
+        viewModelScope.launch { repository.toggleSettled(transaction) }
     }
 
-    /** Loads the outstanding hisaabs eligible to be covered by a repayment of [repaymentType] (SPENT -> outstanding Loan Taken, RECEIVED -> outstanding Loan Given), then invokes [onLoaded]. */
+    /** Sets a transaction's Active/Cleared status explicitly — used by the swipe gesture and its Undo. */
+    fun setSettled(transaction: Transaction, settled: Boolean) {
+        viewModelScope.launch { repository.setSettled(transaction, settled) }
+    }
+
+    /** Loads the outstanding hisaabs eligible to be covered by a repayment of [repaymentType] (SPENT -> outstanding Received/Loan Taken, RECEIVED -> outstanding Spent/Loan Given), then invokes [onLoaded]. */
     fun loadOutstandingHisaabs(repaymentType: TransactionType, onLoaded: (List<OutstandingHisaab>) -> Unit) {
         viewModelScope.launch {
             onLoaded(repository.getOutstandingHisaabs(accountId, repaymentType))
