@@ -27,6 +27,8 @@ jobs:
           gradle-version: 8.7
 
       - name: Assemble debug APK
+        env:
+          HISAAB_VERSION_CODE: ${{ github.run_number }}
         run: gradle assembleDebug --no-daemon
 
       - name: Upload APK

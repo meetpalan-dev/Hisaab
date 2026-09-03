@@ -355,7 +355,10 @@ class HisaabRepository(private val db: AppDatabase) {
         return count
     }
 
-    /** Recreates an account + its transactions from a parsed "Share as Text" export. Always creates a new account (never merges into an existing one), so re-importing is safe. */
+    /** Looks up an existing account by exact (case-insensitive) name — used before an import creates a new account, so the user can be asked to merge instead of silently duplicating it. */
+    suspend fun findAccountByName(name: String): Account? = accountDao.findByExactName(name.trim())
+
+    /** Recreates an account + its transactions from a parsed "Share as Text" export. Always creates a new account (never merges into an existing one) — used for "Create Separate Account" once the caller has already checked [findAccountByName] and asked the user. */
     suspend fun importParsedHisab(parsed: com.palan.hisaab.util.ParsedHisab): Long {
         val accountId = accountDao.insert(Account(name = parsed.accountName))
         if (parsed.initialBalanceMinor != 0L) {
@@ -388,6 +391,51 @@ class HisaabRepository(private val db: AppDatabase) {
             )
         }
         return accountId
+    }
+
+    /**
+     * Merges a parsed "Share as Text" import into an already-existing [accountId] instead of
+     * creating a duplicate account — used for "Merge with Existing Account". Balances recalculate
+     * automatically since they're always derived live from the transactions table; nothing needs
+     * to be rewritten on the existing rows.
+     *
+     * Before inserting each imported transaction, it's compared against every transaction already
+     * in the account by date + amount + description + type — an exact match on all four is treated
+     * as the same transaction re-appearing (e.g. importing the same export twice, or two exports
+     * with overlapping date ranges) and is skipped rather than added again. Returns the count of
+     * transactions actually added.
+     */
+    suspend fun mergeParsedHisab(accountId: Long, parsed: com.palan.hisaab.util.ParsedHisab): Int {
+        val existing = transactionDao.getForAccountOnce(accountId)
+        var added = 0
+        parsed.transactions.forEach { txn ->
+            val type = when {
+                txn.isLoan && txn.isSpent -> TransactionType.LOAN_TAKEN
+                txn.isLoan && !txn.isSpent -> TransactionType.LOAN_GIVEN
+                txn.isSpent -> TransactionType.SPENT
+                else -> TransactionType.RECEIVED
+            }
+            val isDuplicate = existing.any {
+                it.date == txn.dateMillis &&
+                    it.amountMinor == txn.amountMinor &&
+                    it.description.equals(txn.description, ignoreCase = true) &&
+                    it.type == type
+            }
+            if (!isDuplicate) {
+                transactionDao.insert(
+                    Transaction(
+                        accountId = accountId,
+                        type = type,
+                        amountMinor = txn.amountMinor,
+                        description = txn.description,
+                        date = txn.dateMillis,
+                        settled = txn.isSettled
+                    )
+                )
+                added++
+            }
+        }
+        return added
     }
 }
 

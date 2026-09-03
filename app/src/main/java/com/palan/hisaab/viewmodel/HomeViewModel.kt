@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.palan.hisaab.data.AccountSummary
 import com.palan.hisaab.data.HisaabRepository
+import com.palan.hisaab.data.entity.Account
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.util.ParsedHisab
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,10 +46,30 @@ class HomeViewModel(private val repository: HisaabRepository) : ViewModel() {
         }
     }
 
-    fun importHisab(parsed: ParsedHisab, onImported: (Long) -> Unit) {
+    /**
+     * Checks whether an account already exists with the same name as [parsed] before importing
+     * it. If so, [onDuplicate] is invoked with the existing account so the UI can offer
+     * Merge / Create Separate / Cancel instead of silently creating a duplicate; otherwise the
+     * import proceeds immediately as a new account.
+     */
+    fun importHisab(parsed: ParsedHisab, onDuplicate: (Account) -> Unit, onImported: (Long) -> Unit) {
         viewModelScope.launch {
-            val id = repository.importParsedHisab(parsed)
-            onImported(id)
+            val existing = repository.findAccountByName(parsed.accountName)
+            if (existing != null) {
+                onDuplicate(existing)
+            } else {
+                onImported(repository.importParsedHisab(parsed))
+            }
         }
+    }
+
+    /** "Create Separate Account" — imports as a brand-new account even though one with the same name already exists. */
+    fun importHisabAsNewAccount(parsed: ParsedHisab, onImported: (Long) -> Unit) {
+        viewModelScope.launch { onImported(repository.importParsedHisab(parsed)) }
+    }
+
+    /** "Merge with Existing Account" — adds the imported transactions into [accountId], skipping exact duplicates. */
+    fun mergeHisab(accountId: Long, parsed: ParsedHisab, onMerged: (addedCount: Int) -> Unit) {
+        viewModelScope.launch { onMerged(repository.mergeParsedHisab(accountId, parsed)) }
     }
 }

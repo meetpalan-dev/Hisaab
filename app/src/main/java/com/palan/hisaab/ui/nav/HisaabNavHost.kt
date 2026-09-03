@@ -29,6 +29,7 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
         composable(Routes.HOME) {
             HomeScreen(
                 repository = repository,
+                settingsRepository = settingsRepository,
                 onOpenAccount = { id -> navController.navigate(Routes.account(id)) },
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                 onOpenSplit = { navController.navigate(Routes.SPLIT) }

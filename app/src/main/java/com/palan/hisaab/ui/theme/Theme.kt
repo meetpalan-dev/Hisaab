@@ -70,18 +70,24 @@ private val HisaabLightColors = lightColorScheme(
 @Composable
 fun HisaabTheme(
     useMaterialYou: Boolean = false,
-    // Default is always-dark per the app's design, regardless of system setting.
-    // Only when Material You is on do we follow the system light/dark setting,
-    // since dynamic color is meant to react to the device's whole appearance.
-    darkTheme: Boolean = if (useMaterialYou) isSystemInDarkTheme() else true,
+    themeMode: com.palan.hisaab.data.ThemeMode = com.palan.hisaab.data.ThemeMode.DARK,
+    accentColor: com.palan.hisaab.data.AccentColor = com.palan.hisaab.data.AccentColor.GOLD,
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
+    // Material You always follows the system light/dark setting (dynamic color reacts to the
+    // whole device appearance); otherwise the explicit Light/Dark/Follow System choice applies.
+    val darkTheme = when {
+        useMaterialYou -> isSystemInDarkTheme()
+        themeMode == com.palan.hisaab.data.ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        themeMode == com.palan.hisaab.data.ThemeMode.LIGHT -> false
+        else -> true
+    }
     val colors = when {
         useMaterialYou && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        darkTheme -> HisaabDarkColors
-        else -> HisaabLightColors
+        darkTheme -> applyAccent(HisaabDarkColors, accentColor)
+        else -> applyAccent(HisaabLightColors, accentColor)
     }
     MaterialTheme(
         colorScheme = colors,
@@ -91,6 +97,17 @@ fun HisaabTheme(
         ),
         content = content
     )
+}
+
+/** Swaps just the primary/secondary hue while keeping the rest of the (dark or light) tonal palette — accent color is a small personalization touch, not a full re-theme. GOLD is a no-op since it's already the base palette's own accent. */
+private fun applyAccent(base: androidx.compose.material3.ColorScheme, accent: com.palan.hisaab.data.AccentColor): androidx.compose.material3.ColorScheme {
+    val hue = when (accent) {
+        com.palan.hisaab.data.AccentColor.GOLD -> return base
+        com.palan.hisaab.data.AccentColor.BLUE -> Color(0xFF5B8DEF)
+        com.palan.hisaab.data.AccentColor.GREEN -> GreenReceived
+        com.palan.hisaab.data.AccentColor.ROSE -> Color(0xFFE0708A)
+    }
+    return base.copy(primary = hue, secondary = hue)
 }
 
 val BalanceTextStyle = TextStyle(fontSize = 40.sp, fontWeight = FontWeight.Bold)

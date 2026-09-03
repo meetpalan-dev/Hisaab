@@ -34,4 +34,8 @@ interface AccountDao {
 
     @Query("SELECT * FROM accounts WHERE name LIKE '%' || :query || '%' OR phoneNumber LIKE '%' || :query || '%' ORDER BY name COLLATE NOCASE ASC")
     fun searchByName(query: String): Flow<List<Account>>
+
+    /** Case-insensitive exact-name lookup, used to detect a likely duplicate account before an import creates a new one. */
+    @Query("SELECT * FROM accounts WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun findByExactName(name: String): Account?
 }

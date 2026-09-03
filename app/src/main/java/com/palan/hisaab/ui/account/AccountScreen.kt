@@ -1,7 +1,9 @@
 package com.palan.hisaab.ui.account
 
 import android.content.Intent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,9 +11,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -33,14 +37,11 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -74,6 +75,7 @@ import com.palan.hisaab.viewmodel.AccountUiState
 import com.palan.hisaab.viewmodel.AccountViewModel
 import com.palan.hisaab.viewmodel.SettingsViewModel
 import java.util.Date
+import kotlin.math.roundToInt
 
 private enum class HistoryFilter(val label: String) { ACTIVE("Active"), ALL("All"), CLEARED("Cleared") }
 
@@ -131,14 +133,28 @@ fun AccountScreen(
 
     // Quick manual settlement (swipe gesture): applies the change immediately, then offers
     // a brief Undo via snackbar that flips it straight back — never deletes the transaction.
-    fun handleQuickSettle(txn: Transaction, newSettled: Boolean) {
+    // The Undo offer itself is skippable via Settings; the swipe gesture (and confirmation
+    // prompt before settling) are too.
+    var pendingSwipeSettle by remember { mutableStateOf<Transaction?>(null) }
+
+    fun applySettle(txn: Transaction, newSettled: Boolean) {
         viewModel.setSettled(txn, newSettled)
-        coroutineScope.launch {
-            val message = if (newSettled) "Marked \"${txn.description}\" as settled" else "Restored \"${txn.description}\" to active"
-            val result = snackbarHostState.showSnackbar(message, actionLabel = "Undo", duration = SnackbarDuration.Short)
-            if (result == SnackbarResult.ActionPerformed) {
-                viewModel.setSettled(txn, !newSettled)
+        if (settings.undoEnabled) {
+            coroutineScope.launch {
+                val message = if (newSettled) "Marked \"${txn.description}\" as settled" else "Restored \"${txn.description}\" to active"
+                val result = snackbarHostState.showSnackbar(message, actionLabel = "Undo", duration = SnackbarDuration.Short)
+                if (result == SnackbarResult.ActionPerformed) {
+                    viewModel.setSettled(txn, !newSettled)
+                }
             }
+        }
+    }
+
+    fun handleQuickSettle(txn: Transaction, newSettled: Boolean) {
+        if (newSettled && settings.confirmBeforeSettle) {
+            pendingSwipeSettle = txn
+        } else {
+            applySettle(txn, newSettled)
         }
     }
 
@@ -146,15 +162,17 @@ fun AccountScreen(
         HistoryFilter.ACTIVE -> state.activeTransactions
         HistoryFilter.ALL -> state.transactions
         HistoryFilter.CLEARED -> state.clearedTransactions
-    }
-    // Swipe RIGHT in Active settles a transaction; swipe LEFT in Cleared restores it. All has no swipe.
-    val swipeDirection = when (filter) {
+    }.let { if (settings.sortNewestFirst) it else it.reversed() }
+    // Swipe RIGHT in Active settles a transaction; swipe LEFT in Cleared restores it. All has no
+    // swipe. The whole gesture can also be turned off in Settings.
+    val swipeDirection = if (!settings.swipeToSettleEnabled) SwipeDirection.NONE else when (filter) {
         HistoryFilter.ACTIVE -> SwipeDirection.SETTLE
         HistoryFilter.CLEARED -> SwipeDirection.RESTORE
         HistoryFilter.ALL -> SwipeDirection.NONE
     }
-    val groupedTransactions = remember(visibleTransactions) {
-        visibleTransactions.groupBy { monthGroupLabel(it.date) }
+    val groupedTransactions = remember(visibleTransactions, settings.groupByMonth) {
+        if (settings.groupByMonth) visibleTransactions.groupBy { monthGroupLabel(it.date) }
+        else linkedMapOf("" to visibleTransactions)
     }
 
     Scaffold(
@@ -207,8 +225,8 @@ fun AccountScreen(
                             text = { Text("Share as Image") },
                             onClick = {
                                 showShareMenu = false
-                                val file = HisabDocumentExporter.createImage(context, state.accountName, state)
-                                HisabDocumentExporter.shareFile(context, file, "image/png", "Share ${state.accountName} Hisab")
+                                val files = HisabDocumentExporter.createImages(context, state.accountName, state)
+                                HisabDocumentExporter.shareFiles(context, files, "image/png", "Share ${state.accountName} Hisab")
                             }
                         )
                     }
@@ -267,20 +285,23 @@ fun AccountScreen(
                     verticalArrangement = Arrangement.spacedBy(Spacing.tight)
                 ) {
                     groupedTransactions.forEach { (month, txnsInMonth) ->
-                        item(key = "header_$month") {
-                            Text(
-                                month,
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-                            )
+                        if (month.isNotEmpty()) {
+                            item(key = "header_$month") {
+                                Text(
+                                    month,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                                )
+                            }
                         }
                         items(txnsInMonth, key = { it.id }) { txn ->
                             SwipeableTransactionRow(
                                 transaction = txn,
                                 remainingMinor = state.remainingFor(txn),
                                 isPartiallyPaid = state.isPartiallyPaid(txn),
+                                showCategory = settings.showCategories,
                                 swipeDirection = swipeDirection,
                                 onClick = { editingTransaction = txn },
                                 onSwipeAction = { newSettled -> handleQuickSettle(txn, newSettled) }
@@ -291,6 +312,23 @@ fun AccountScreen(
                 }
             }
         }
+    }
+
+    pendingSwipeSettle?.let { txn ->
+        AlertDialog(
+            onDismissRequest = { pendingSwipeSettle = null },
+            title = { Text("Mark this transaction as settled?") },
+            text = { Text(txn.description) },
+            confirmButton = {
+                TextButton(onClick = {
+                    applySettle(txn, true)
+                    pendingSwipeSettle = null
+                }) { Text("Mark Settled") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSwipeSettle = null }) { Text("Cancel") }
+            }
+        )
     }
 
     if (showAddDialog) {
@@ -481,54 +519,73 @@ private fun StatColumn(label: String, value: String, modifier: Modifier = Modifi
 
 /**
  * Wraps [TransactionRow] with a swipe-to-settle (Active tab) or swipe-to-restore (Cleared tab)
- * gesture. The swipe always snaps back after firing [onSwipeAction] — the row then disappears
- * on its own once the DB update flows back through the account's transaction list for this tab,
- * rather than the dismiss animation trying to remove it itself. No transaction is ever deleted.
+ * gesture, implemented directly on [Modifier.draggable] rather than the material3
+ * SwipeToDismissBox — this gives explicit control over the trigger distance and, since
+ * `draggable` is locked to [Orientation.Horizontal], it never competes with the LazyColumn's
+ * vertical scroll (a different axis entirely) and never blocks the row's own tap-to-edit click,
+ * which only ever sees events draggable didn't consume. The row always springs back to its
+ * resting position after firing [onSwipeAction] — the row then disappears on its own once the
+ * DB update flows back through the account's transaction list for this tab. No transaction is
+ * ever deleted by this gesture.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SwipeableTransactionRow(
     transaction: Transaction,
     remainingMinor: Long,
     isPartiallyPaid: Boolean,
+    showCategory: Boolean,
     swipeDirection: SwipeDirection,
     onClick: () -> Unit,
     onSwipeAction: (newSettled: Boolean) -> Unit
 ) {
     if (swipeDirection == SwipeDirection.NONE) {
-        TransactionRow(transaction, remainingMinor, isPartiallyPaid, onClick)
+        TransactionRow(transaction, remainingMinor, isPartiallyPaid, showCategory, onClick)
         return
     }
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            when {
-                value == SwipeToDismissBoxValue.StartToEnd && swipeDirection == SwipeDirection.SETTLE ->
-                    onSwipeAction(true)
-                value == SwipeToDismissBoxValue.EndToStart && swipeDirection == SwipeDirection.RESTORE ->
-                    onSwipeAction(false)
-            }
-            false // always snap back; the item leaves the list once the underlying data changes
+    val isSettle = swipeDirection == SwipeDirection.SETTLE
+    val offsetX = remember { androidx.compose.animation.core.Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val triggerPx = with(density) { 88.dp.toPx() }
+    val maxDragPx = with(density) { 140.dp.toPx() }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        // Revealed underneath as the row is dragged.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background((if (isSettle) GreenReceived else MaterialTheme.colorScheme.primary).copy(alpha = 0.16f))
+                .padding(horizontal = 24.dp, vertical = 14.dp),
+            contentAlignment = if (isSettle) Alignment.CenterStart else Alignment.CenterEnd
+        ) {
+            Text(
+                if (isSettle) "Settle" else "Restore",
+                color = if (isSettle) GreenReceived else MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
         }
-    )
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = swipeDirection == SwipeDirection.SETTLE,
-        enableDismissFromEndToStart = swipeDirection == SwipeDirection.RESTORE,
-        backgroundContent = {
-            val isSettle = swipeDirection == SwipeDirection.SETTLE
-            Box(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                contentAlignment = if (isSettle) Alignment.CenterStart else Alignment.CenterEnd
-            ) {
-                Text(
-                    if (isSettle) "Settle" else "Restore",
-                    color = if (isSettle) GreenReceived else MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { androidx.compose.ui.unit.IntOffset(offsetX.value.roundToInt(), 0) }
+                .draggable(
+                    orientation = androidx.compose.foundation.gestures.Orientation.Horizontal,
+                    state = androidx.compose.foundation.gestures.rememberDraggableState { delta ->
+                        val proposed = offsetX.value + delta
+                        val clamped = if (isSettle) proposed.coerceIn(0f, maxDragPx) else proposed.coerceIn(-maxDragPx, 0f)
+                        scope.launch { offsetX.snapTo(clamped) }
+                    },
+                    onDragStopped = {
+                        val fired = if (isSettle) offsetX.value > triggerPx else offsetX.value < -triggerPx
+                        if (fired) onSwipeAction(isSettle)
+                        offsetX.animateTo(0f, animationSpec = androidx.compose.animation.core.tween(180))
+                    }
                 )
-            }
+        ) {
+            TransactionRow(transaction, remainingMinor, isPartiallyPaid, showCategory, onClick)
         }
-    ) {
-        TransactionRow(transaction, remainingMinor, isPartiallyPaid, onClick)
     }
 }
 
@@ -537,6 +594,7 @@ private fun TransactionRow(
     transaction: Transaction,
     remainingMinor: Long,
     isPartiallyPaid: Boolean,
+    showCategory: Boolean,
     onClick: () -> Unit
 ) {
     val isPositive = transaction.type == TransactionType.RECEIVED || transaction.type == TransactionType.LOAN_GIVEN
@@ -571,7 +629,8 @@ private fun TransactionRow(
                     }
                 }
                 val dateText = transaction.date?.let { Date(it).toDisplayString() } ?: "No date"
-                val meta = listOfNotNull(dateText, typeLabel, transaction.category).joinToString(" • ")
+                val category = if (showCategory) transaction.category else null
+                val meta = listOfNotNull(dateText, typeLabel, category).joinToString(" • ")
                 Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (isPartiallyPaid) {
                     Text(

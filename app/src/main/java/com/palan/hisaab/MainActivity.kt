@@ -28,7 +28,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun HisaabApp(app: HisaabApplication) {
     val settings by app.settingsRepository.settings.collectAsState(initial = HisaabSettings())
-    HisaabTheme(useMaterialYou = settings.useMaterialYou) {
+    HisaabTheme(
+        useMaterialYou = settings.useMaterialYou,
+        themeMode = settings.themeMode,
+        accentColor = settings.accentColor
+    ) {
         Surface(modifier = Modifier.fillMaxSize()) {
             HisaabNavHost(repository = app.repository, settingsRepository = app.settingsRepository)
         }

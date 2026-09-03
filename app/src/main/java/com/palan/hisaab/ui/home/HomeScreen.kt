@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -40,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -60,17 +62,20 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.palan.hisaab.data.AccountSummary
 import com.palan.hisaab.data.HisaabRepository
+import com.palan.hisaab.data.SettingsRepository
 import com.palan.hisaab.ui.common.InitialsAvatar
 import com.palan.hisaab.ui.createaccount.CreateAccountDialog
 import com.palan.hisaab.ui.theme.Spacing
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.viewmodel.HomeViewModel
+import com.palan.hisaab.viewmodel.SettingsViewModel
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     repository: HisaabRepository,
+    settingsRepository: SettingsRepository,
     onOpenAccount: (Long) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSplit: () -> Unit
@@ -79,15 +84,24 @@ fun HomeScreen(
         viewModelFactory { initializer { HomeViewModel(repository) } }
     }
     val viewModel: HomeViewModel = viewModel(factory = factory)
+    val settingsFactory = remember {
+        viewModelFactory { initializer { SettingsViewModel(settingsRepository) } }
+    }
+    val settingsViewModel: SettingsViewModel = viewModel(factory = settingsFactory)
+    val settings by settingsViewModel.settings.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    val summaries by viewModel.accountSummaries.collectAsState()
+    val allSummaries by viewModel.accountSummaries.collectAsState()
+    val summaries = if (settings.hideZeroBalanceAccounts) allSummaries.filter { it.balance != 0L } else allSummaries
     val query by viewModel.query.collectAsState()
     var showCreateDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var fabExpanded by remember { mutableStateOf(false) }
+    var pendingImport by remember { mutableStateOf<com.palan.hisaab.util.ParsedHisab?>(null) }
+    var duplicateAccount by remember { mutableStateOf<com.palan.hisaab.data.entity.Account?>(null) }
+    var mergeMessage by remember { mutableStateOf<String?>(null) }
 
     val exportBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
@@ -199,11 +213,62 @@ fun HomeScreen(
         ImportHisabDialog(
             onDismiss = { showImportDialog = false },
             onImport = { parsed ->
-                viewModel.importHisab(parsed) { newId ->
-                    showImportDialog = false
-                    onOpenAccount(newId)
+                viewModel.importHisab(
+                    parsed,
+                    onDuplicate = { existing ->
+                        // Found an account with the same name — ask before creating a duplicate.
+                        pendingImport = parsed
+                        duplicateAccount = existing
+                        showImportDialog = false
+                    },
+                    onImported = { newId ->
+                        showImportDialog = false
+                        onOpenAccount(newId)
+                    }
+                )
+            }
+        )
+    }
+
+    val importToResolve = pendingImport
+    val existingMatch = duplicateAccount
+    if (importToResolve != null && existingMatch != null) {
+        AlertDialog(
+            onDismissRequest = { pendingImport = null; duplicateAccount = null },
+            title = { Text("Account already exists") },
+            text = { Text("An account named \"${existingMatch.name}\" already exists.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.mergeHisab(existingMatch.id, importToResolve) { addedCount ->
+                        pendingImport = null
+                        duplicateAccount = null
+                        mergeMessage = if (addedCount == 1) "Added 1 new transaction to ${existingMatch.name}."
+                            else "Added $addedCount new transactions to ${existingMatch.name} (duplicates were skipped)."
+                        onOpenAccount(existingMatch.id)
+                    }
+                }) { Text("Merge with Existing Account") }
+            },
+            dismissButton = {
+                Column {
+                    TextButton(onClick = {
+                        viewModel.importHisabAsNewAccount(importToResolve) { newId ->
+                            pendingImport = null
+                            duplicateAccount = null
+                            onOpenAccount(newId)
+                        }
+                    }) { Text("Create Separate Account") }
+                    TextButton(onClick = { pendingImport = null; duplicateAccount = null }) { Text("Cancel") }
                 }
             }
+        )
+    }
+
+    mergeMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { mergeMessage = null },
+            title = { Text("Merged") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { mergeMessage = null }) { Text("OK") } }
         )
     }
 }

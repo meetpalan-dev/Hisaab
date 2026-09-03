@@ -8,17 +8,42 @@ android {
     namespace = "com.palan.hisaab"
     compileSdk = 34
 
+    // A fixed, checked-in signing key (see /keystore/hisaab-debug.jks) used for every build —
+    // debug included. Without this, each CI run signs the debug APK with a brand-new random
+    // key from the runner's throwaway ~/.android/debug.keystore, so every new build has a
+    // different signature than what's already on the phone. Android refuses to install an
+    // update whose signature doesn't match the installed app's ("package conflicts with an
+    // existing package"), forcing an uninstall every time. Pinning the keystore here fixes it.
+    signingConfigs {
+        create("hisaab") {
+            storeFile = file("../keystore/hisaab-debug.jks")
+            storePassword = "hisaab123"
+            keyAlias = "hisaab"
+            keyPassword = "hisaab123"
+        }
+    }
+
+    // CI passes the GitHub Actions run number in as HISAAB_VERSION_CODE so every build gets a
+    // higher versionCode than the last (Android also refuses an "update" with a versionCode
+    // that isn't strictly greater than what's installed). Local builds without that env var
+    // fall back to 1, which is fine for local debugging/sideloading only.
+    val ciVersionCode = System.getenv("HISAAB_VERSION_CODE")?.toIntOrNull()
+
     defaultConfig {
         applicationId = "com.palan.hisaab"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = ciVersionCode ?: 1
+        versionName = "1.0.${ciVersionCode ?: 0}"
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("hisaab")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("hisaab")
         }
     }
 
