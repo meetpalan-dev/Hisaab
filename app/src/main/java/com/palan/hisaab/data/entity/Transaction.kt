@@ -35,7 +35,7 @@ data class Transaction(
     val category: String? = null,
     /** Active/Cleared status — false = Active (still outstanding), true = Cleared/settled. Applies to every transaction (via swipe gesture, the Edit screen's Mark as Settled button, or automatically once a repayment allocation fully covers it). Never deletes the transaction; it stays visible in the All tab and in history either way. */
     val settled: Boolean = false,
-    /** True for a RECEIVED/SPENT transaction explicitly marked "Repayment / Settle Hisaab". Its own amount is excluded from the normal received/spent totals — the balance effect instead comes entirely from the RepaymentAllocation rows it created, which reduce the outstanding amount on one or more loan transactions. */
+    /** True for a RECEIVED/SPENT transaction created via "Settle Hisaab" (automatically applied against the account's outstanding hisaab) rather than entered as a normal transaction. Its amount is counted normally in the received/spent totals, except for whatever portion was allocated to a Loan Given/Loan Taken target — that portion is excluded there since it's already reflected by the loan's own outstanding total shrinking instead. */
     val isRepayment: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()

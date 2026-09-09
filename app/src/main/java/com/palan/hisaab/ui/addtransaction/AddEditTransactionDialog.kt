@@ -59,7 +59,7 @@ fun AddEditTransactionDialog(
     onSave: (type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?) -> Unit,
     onDelete: (() -> Unit)? = null,
     onToggleSettled: (() -> Unit)? = null,
-    /** When set, a new Received/Spent transaction can be marked "Repayment / Settle Hisaab" — instead of saving normally, this is invoked so the caller can open the outstanding-hisaab allocation flow. Only offered when creating a new transaction (not editing one). */
+    /** When set, a new Received/Spent transaction can be marked "Settle Hisaab" — instead of saving normally, this is invoked so the caller can record it and automatically apply it against the account's outstanding hisaab. Only offered when creating a new transaction (not editing one). */
     onStartRepayment: ((type: TransactionType, amountMinor: Long, description: String, date: Long?) -> Unit)? = null
 ) {
     var type by remember { mutableStateOf(existing?.type ?: TransactionType.SPENT) }
@@ -156,9 +156,9 @@ fun AddEditTransactionDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text("Repayment / Settle Hisaab", style = MaterialTheme.typography.bodyMedium)
+                            Text("Settle Hisaab", style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                if (type == TransactionType.SPENT) "Pays off an outstanding hisaab you owe" else "Settles an outstanding hisaab owed to you",
+                                if (type == TransactionType.SPENT) "This amount will automatically be applied against what you owe them, oldest first" else "This amount will automatically be applied against what they owe you, oldest first",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -192,7 +192,7 @@ fun AddEditTransactionDialog(
                         }
                     }
                 }
-            ) { Text(if (isRepayment && repaymentEligible) "Next" else "Save") }
+            ) { Text(if (isRepayment && repaymentEligible) "Settle" else "Save") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }

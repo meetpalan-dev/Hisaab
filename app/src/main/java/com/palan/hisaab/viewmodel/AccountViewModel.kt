@@ -3,9 +3,7 @@ package com.palan.hisaab.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.palan.hisaab.data.HisaabRepository
-import com.palan.hisaab.data.RepaymentAllocationInput
 import com.palan.hisaab.data.RepaymentResult
-import com.palan.hisaab.data.dao.OutstandingHisaab
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -111,23 +109,19 @@ class AccountViewModel(
         viewModelScope.launch { repository.setSettled(transaction, settled) }
     }
 
-    /** Loads the outstanding hisaabs eligible to be covered by a repayment of [repaymentType] (SPENT -> outstanding Received/Loan Taken, RECEIVED -> outstanding Spent/Loan Given), then invokes [onLoaded]. */
-    fun loadOutstandingHisaabs(repaymentType: TransactionType, onLoaded: (List<OutstandingHisaab>) -> Unit) {
-        viewModelScope.launch {
-            onLoaded(repository.getOutstandingHisaabs(accountId, repaymentType))
-        }
-    }
-
-    fun submitRepayment(
+    /**
+     * "Settle Hisaab": records the real amount paid/received and automatically applies it
+     * against this account's outstanding hisaab, oldest-first — no manual picking required.
+     */
+    fun settleHisaab(
         type: TransactionType,
         amountMinor: Long,
         description: String,
         date: Long?,
-        allocations: List<RepaymentAllocationInput>,
         onDone: (RepaymentResult) -> Unit
     ) {
         viewModelScope.launch {
-            val result = repository.applyRepayment(accountId, type, amountMinor, description, date, allocations)
+            val result = repository.settleHisaab(accountId, type, amountMinor, description, date)
             onDone(result)
         }
     }

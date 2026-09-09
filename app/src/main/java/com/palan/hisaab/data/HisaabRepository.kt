@@ -23,15 +23,20 @@ data class AccountSummary(
     val hasLoans: Boolean get() = loanGiven != 0L || loanTaken != 0L
 }
 
-/** One allocation the user has chosen while building a repayment: "cover ₹X of this outstanding hisaab." */
+/** One allocation applied while settling a hisaab: "cover ₹X of this outstanding transaction." Computed automatically by [HisaabRepository.settleHisaab] — no longer something the user picks by hand. */
 data class RepaymentAllocationInput(val targetTransactionId: Long, val amountMinor: Long)
 
-/** What a confirmed repayment settled, for the confirmation summary. */
+/** What a confirmed "Settle Hisaab" settlement applied, for the confirmation summary. */
 data class RepaymentResult(
     val repaymentTransactionId: Long,
+    val repaymentAmountMinor: Long,
+    val totalAllocatedMinor: Long,
     val cleared: List<Transaction>,
     val partiallyPaid: List<Pair<Transaction, Long>> // transaction to remaining-after
-)
+) {
+    /** Any amount left over once every eligible outstanding hisaab was already fully covered — never force-assigned, just part of the recorded transaction's own amount. */
+    val unallocatedMinor: Long get() = (repaymentAmountMinor - totalAllocatedMinor).coerceAtLeast(0L)
+}
 
 class HisaabRepository(private val db: AppDatabase) {
 
@@ -177,29 +182,61 @@ class HisaabRepository(private val db: AppDatabase) {
     }
 
     /**
-     * Outstanding transactions eligible to be covered by a repayment of [repaymentType] in
-     * [accountId], based on transaction direction:
-     *  - A SPENT repayment (you're paying money out) settles outstanding RECEIVED transactions
-     *    (money that came in and is still owed back) or legacy LOAN_TAKEN ones.
-     *  - A RECEIVED repayment (money is coming back to you) settles outstanding SPENT
-     *    transactions (money that went out and is still owed to you) or LOAN_GIVEN ones.
+     * Which outstanding transaction types a repayment of [repaymentType] is eligible to cover,
+     * based on direction — a SPENT repayment (you're paying money out) settles outstanding
+     * RECEIVED transactions (money that came in and is still owed back) or legacy LOAN_TAKEN
+     * ones; a RECEIVED repayment (money is coming back to you) settles outstanding SPENT
+     * transactions (money that went out and is still owed to you) or LOAN_GIVEN ones.
      */
-    suspend fun getOutstandingHisaabs(accountId: Long, repaymentType: TransactionType): List<OutstandingHisaab> {
-        val targetTypes = if (repaymentType == TransactionType.SPENT)
+    private fun eligibleTargetTypes(repaymentType: TransactionType): List<TransactionType> =
+        if (repaymentType == TransactionType.SPENT)
             listOf(TransactionType.RECEIVED, TransactionType.LOAN_TAKEN)
         else
             listOf(TransactionType.SPENT, TransactionType.LOAN_GIVEN)
-        return repaymentAllocationDao.getOutstanding(accountId, targetTypes)
+
+    suspend fun getOutstandingHisaabs(accountId: Long, repaymentType: TransactionType): List<OutstandingHisaab> =
+        repaymentAllocationDao.getOutstanding(accountId, eligibleTargetTypes(repaymentType))
+
+    /**
+     * "Settle Hisaab": records a real Received/Spent transaction for the actual amount paid or
+     * received, then automatically applies it against this account's outstanding hisaab — the
+     * user never has to pick which historical transaction it belongs to. Outstanding transactions
+     * are covered oldest-first: each one is covered in full (and marked Cleared) until the amount
+     * runs out, the one it runs out on becomes Partially Settled with its own remaining balance
+     * tracked, and anything after that stays untouched. If the amount paid is more than the total
+     * outstanding, the extra is simply left as part of the recorded transaction — never force-fit
+     * against an already-settled hisaab. The whole thing (transaction + every allocation + every
+     * status flip) is one all-or-nothing operation.
+     */
+    suspend fun settleHisaab(
+        accountId: Long,
+        type: TransactionType,
+        amountMinor: Long,
+        description: String,
+        date: Long?
+    ): RepaymentResult = db.withTransaction {
+        val outstanding = repaymentAllocationDao.getOutstanding(accountId, eligibleTargetTypes(type))
+        var pool = amountMinor
+        val allocations = mutableListOf<RepaymentAllocationInput>()
+        for (hisaab in outstanding) {
+            if (pool <= 0L) break
+            val take = minOf(pool, hisaab.remainingMinor)
+            if (take > 0L) {
+                allocations.add(RepaymentAllocationInput(hisaab.transaction.id, take))
+                pool -= take
+            }
+        }
+        applyRepayment(accountId, type, amountMinor, description, date, allocations)
     }
 
     /**
-     * Records a repayment: inserts the RECEIVED/SPENT transaction (flagged isRepayment so it's
-     * excluded from normal income/expense totals) plus one RepaymentAllocation per hisaab the
-     * user chose to cover, and marks each fully-covered loan transaction settled. All-or-nothing —
-     * if anything fails, nothing is written, so a partial repayment can never leave the ledger
-     * with an allocation but no transaction (or vice versa).
+     * Records a repayment: inserts the RECEIVED/SPENT transaction (flagged isRepayment) plus one
+     * RepaymentAllocation per hisaab [allocations] covers, and marks each fully-covered target
+     * settled — used internally by [settleHisaab]'s automatic allocation. All-or-nothing — if
+     * anything fails, nothing is written, so a partial settlement can never leave the ledger with
+     * an allocation but no transaction (or vice versa).
      */
-    suspend fun applyRepayment(
+    private suspend fun applyRepayment(
         accountId: Long,
         type: TransactionType,
         amountMinor: Long,
@@ -219,6 +256,7 @@ class HisaabRepository(private val db: AppDatabase) {
         )
         val cleared = mutableListOf<Transaction>()
         val partial = mutableListOf<Pair<Transaction, Long>>()
+        var totalAllocated = 0L
         for (alloc in allocations) {
             if (alloc.amountMinor <= 0L) continue
             repaymentAllocationDao.insert(
@@ -228,9 +266,10 @@ class HisaabRepository(private val db: AppDatabase) {
                     allocatedAmountMinor = alloc.amountMinor
                 )
             )
+            totalAllocated += alloc.amountMinor
             val target = transactionDao.getById(alloc.targetTransactionId) ?: continue
-            val totalAllocated = repaymentAllocationDao.sumForTarget(alloc.targetTransactionId)
-            val remaining = target.amountMinor - totalAllocated
+            val allocatedForTarget = repaymentAllocationDao.sumForTarget(alloc.targetTransactionId)
+            val remaining = target.amountMinor - allocatedForTarget
             if (remaining <= 0L) {
                 transactionDao.update(target.copy(settled = true, updatedAt = System.currentTimeMillis()))
                 cleared.add(target)
@@ -238,7 +277,13 @@ class HisaabRepository(private val db: AppDatabase) {
                 partial.add(target to remaining)
             }
         }
-        RepaymentResult(repaymentTransactionId = repaymentId, cleared = cleared, partiallyPaid = partial)
+        RepaymentResult(
+            repaymentTransactionId = repaymentId,
+            repaymentAmountMinor = amountMinor,
+            totalAllocatedMinor = totalAllocated,
+            cleared = cleared,
+            partiallyPaid = partial
+        )
     }
 
     suspend fun deleteAccount(account: Account) {

@@ -65,6 +65,14 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    // Robolectric needs the Android platform "resources.arsc"/manifest that unit tests otherwise
+    // skip, since it runs Room + AppDatabase against a real (simulated) Android environment
+    // rather than mocking it away.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -88,4 +96,13 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Settlement-logic tests (see app/src/test — HisaabRepositorySettlementTest) run against a
+    // real in-memory Room database under Robolectric, so they exercise the actual SQL, not a
+    // hand-rolled fake.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("androidx.room:room-testing:2.6.1")
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("androidx.test:core-ktx:1.6.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
 }

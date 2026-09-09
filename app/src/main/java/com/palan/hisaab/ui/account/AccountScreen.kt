@@ -61,7 +61,6 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.palan.hisaab.data.HisaabRepository
 import com.palan.hisaab.data.RepaymentResult
 import com.palan.hisaab.data.SettingsRepository
-import com.palan.hisaab.data.dao.OutstandingHisaab
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
 import com.palan.hisaab.ui.addtransaction.AddEditTransactionDialog
@@ -88,9 +87,6 @@ private fun monthGroupLabel(dateMillis: Long?): String {
     if (dateMillis == null) return "No Date"
     return java.text.SimpleDateFormat("MMMM yyyy", java.util.Locale.getDefault()).format(Date(dateMillis))
 }
-
-/** Holds a repayment that's mid-flow: amount/description entered, waiting on the user to pick which outstanding hisaab(s) it covers. */
-private data class PendingRepayment(val type: TransactionType, val amountMinor: Long, val description: String, val date: Long?)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,9 +119,7 @@ fun AccountScreen(
     var showShareMenu by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(HistoryFilter.ACTIVE) }
 
-    // Repayment flow: amount entered -> outstanding hisaabs loaded -> allocation dialog -> confirmation.
-    var pendingRepayment by remember { mutableStateOf<PendingRepayment?>(null) }
-    var outstandingForRepayment by remember { mutableStateOf<List<OutstandingHisaab>>(emptyList()) }
+    // "Settle Hisaab": amount entered -> automatically applied against outstanding hisaab -> confirmation.
     var repaymentResult by remember { mutableStateOf<RepaymentResult?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -342,8 +336,9 @@ fun AccountScreen(
             },
             onStartRepayment = { type, amountMinor, description, date ->
                 showAddDialog = false
-                pendingRepayment = PendingRepayment(type, amountMinor, description, date)
-                viewModel.loadOutstandingHisaabs(type) { outstandingForRepayment = it }
+                viewModel.settleHisaab(type, amountMinor, description, date) { result ->
+                    repaymentResult = result
+                }
             }
         )
     }
@@ -372,31 +367,18 @@ fun AccountScreen(
         )
     }
 
-    pendingRepayment?.let { pending ->
-        RepaymentAllocationDialog(
-            repaymentType = pending.type,
-            amountMinor = pending.amountMinor,
-            description = pending.description,
-            outstanding = outstandingForRepayment,
-            onDismiss = { pendingRepayment = null },
-            onConfirm = { allocations ->
-                viewModel.submitRepayment(pending.type, pending.amountMinor, pending.description, pending.date, allocations) { result ->
-                    repaymentResult = result
-                }
-                pendingRepayment = null
-            }
-        )
-    }
-
     repaymentResult?.let { result ->
         AlertDialog(
             onDismissRequest = { repaymentResult = null },
-            title = { Text("Repayment recorded") },
+            title = { Text("Hisaab settled") },
             text = {
                 Column {
-                    Text("${Money.format(result.cleared.sumOf { it.amountMinor } + result.partiallyPaid.sumOf { it.first.amountMinor - it.second })} allocated")
-                    result.cleared.forEach { Text("✓ ${it.description} cleared") }
+                    Text("${Money.format(result.totalAllocatedMinor)} applied against outstanding hisaab")
+                    result.cleared.forEach { Text("✓ ${it.description} — fully cleared") }
                     result.partiallyPaid.forEach { (t, remaining) -> Text("${t.description}: ${Money.format(remaining)} remaining") }
+                    if (result.unallocatedMinor > 0L) {
+                        Text("${Money.format(result.unallocatedMinor)} had no outstanding hisaab left to apply to")
+                    }
                 }
             },
             confirmButton = {

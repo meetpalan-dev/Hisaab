@@ -33,7 +33,7 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: Long): Transaction?
 
-    /** Used for INITIAL_BALANCE. For RECEIVED/SPENT, use [observeIncomeExpenseSum] instead (excludes repayments). For LOAN_GIVEN/LOAN_TAKEN, use [observeOutstandingLoanSum] instead (nets out allocations). */
+    /** Used for INITIAL_BALANCE. For RECEIVED/SPENT, use [observeIncomeExpenseSum] instead (nets loan-allocated repayment amounts). For LOAN_GIVEN/LOAN_TAKEN, use [observeOutstandingLoanSum] instead (nets out allocations). */
     @Query(
         """
         SELECT COALESCE(SUM(amountMinor), 0) FROM transactions
@@ -42,11 +42,33 @@ interface TransactionDao {
     )
     fun observeSumByType(accountId: Long, type: TransactionType): Flow<Long>
 
-    /** RECEIVED/SPENT total, excluding transactions marked as a repayment — those settle a loan instead, and are counted through [observeOutstandingLoanSum] so they aren't double-counted. */
+    /**
+     * RECEIVED/SPENT total. A repayment transaction (isRepayment=1) is a real transaction and
+     * always counts in full here — UNLESS some of its amount was allocated to an outstanding
+     * LOAN_GIVEN/LOAN_TAKEN transaction, in which case that loan-allocated portion is excluded
+     * here because it's already reflected by [observeOutstandingLoanSum] netting the loan's own
+     * outstanding total down. Without this split, a repayment settling a loan would get counted
+     * twice (once here, once via the loan netting), while a repayment settling a plain
+     * Received/Spent hisaab (which has no netting of its own) would otherwise vanish from the
+     * balance entirely if excluded outright — this is the one calculation every screen (list,
+     * balance header, and settlement) reads from, so there's no second, divergent balance logic.
+     */
     @Query(
         """
-        SELECT COALESCE(SUM(amountMinor), 0) FROM transactions
-        WHERE accountId = :accountId AND type = :type AND isRepayment = 0
+        SELECT COALESCE(SUM(
+            CASE WHEN t.isRepayment = 0 THEN t.amountMinor
+                 ELSE MAX(0, t.amountMinor - COALESCE(loanAlloc.loanAllocated, 0))
+            END
+        ), 0)
+        FROM transactions t
+        LEFT JOIN (
+            SELECT ra.repaymentTransactionId AS rid, SUM(ra.allocatedAmountMinor) AS loanAllocated
+            FROM repayment_allocations ra
+            INNER JOIN transactions tgt ON tgt.id = ra.targetTransactionId
+            WHERE tgt.type IN ('LOAN_GIVEN', 'LOAN_TAKEN')
+            GROUP BY ra.repaymentTransactionId
+        ) loanAlloc ON loanAlloc.rid = t.id
+        WHERE t.accountId = :accountId AND t.type = :type
         """
     )
     fun observeIncomeExpenseSum(accountId: Long, type: TransactionType): Flow<Long>
