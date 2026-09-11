@@ -5,6 +5,8 @@ import com.palan.hisaab.data.dao.OutstandingHisaab
 import com.palan.hisaab.data.dao.TargetAllocatedSum
 import com.palan.hisaab.data.entity.Account
 import com.palan.hisaab.data.entity.RepaymentAllocation
+import com.palan.hisaab.data.entity.SplitParticipantRecord
+import com.palan.hisaab.data.entity.SplitRecord
 import com.palan.hisaab.data.entity.Transaction
 import com.palan.hisaab.data.entity.TransactionType
 import kotlinx.coroutines.flow.Flow
@@ -43,6 +45,7 @@ class HisaabRepository(private val db: AppDatabase) {
     private val accountDao = db.accountDao()
     private val transactionDao = db.transactionDao()
     private val repaymentAllocationDao = db.repaymentAllocationDao()
+    private val splitDao = db.splitDao()
 
     fun observeAccounts(): Flow<List<Account>> = accountDao.observeAll()
 
@@ -301,37 +304,143 @@ class HisaabRepository(private val db: AppDatabase) {
     suspend fun getAllAccountsOnce(): List<Account> = accountDao.getAllOnce()
 
     /**
-     * Applies a split expense: your own share (isSelf) posts as a plain Spent
-     * transaction into a persistent "Me" account — reused across splits, created
-     * once if it doesn't exist yet. Everyone else's share posts as Loan Given
-     * (you paid the total, so each of them owes you their share back).
-     * A new account for anyone typed as a new name is created here, at the moment
-     * of confirmation — not while they're just sitting in the participant list —
-     * and the whole split is one DB transaction, so a failure partway through
-     * can't leave a new account with no transaction, or vice versa.
+     * Applies a split expense, based on who actually paid the bill ([payerName], matched against
+     * [shares] by name):
+     *  - If I'm the payer, ONE Spent transaction is posted on the persistent "Me" account for the
+     *    FULL amount I fronted — not just my own share — so my own tab tracks "how much am I still
+     *    owed back from this," the way a running tab would. Its live remaining amount is
+     *    recomputed by [computeSplitTotalOverrides] from how much everyone else has actually
+     *    settled on their own account, so it shrinks automatically toward just my own share as
+     *    they pay me back — nothing is ever edited on this transaction directly to make that
+     *    happen; my own share simply never counts as "recovered."
+     *  - Everyone else's share becomes a debt *to the payer*. If I'm one of those people, that
+     *    posts as Loan Taken on the payer's account (I owe them). If the payer is Me, each other
+     *    participant's share posts as Loan Given on their account (they owe me).
+     *  - A participant who is neither the payer nor "Me" owes the payer, not me — this app's
+     *    accounts each track a Me-vs-that-person ledger, so there's no honest place to post a
+     *    debt between two other people. That share is left unrecorded (flagged in the result and
+     *    in Split History) rather than silently invented on some account's balance.
+     *
+     * The full breakdown — every participant, their share, and whether it was actually recorded
+     * to a ledger — is always saved to Split History regardless, so nothing about the split is
+     * ever lost even when only part of it could be posted as real transactions.
      */
-    suspend fun applySplit(description: String, shares: List<SplitShare>, date: Long): List<Long> = db.withTransaction {
-        val resultIds = mutableListOf<Long>()
-        var meAccountId: Long? = null
-        for (share in shares) {
-            if (share.amountMinor <= 0L) continue
-            val accountId = when {
-                share.isSelf -> meAccountId ?: getOrCreateMeAccount().also { meAccountId = it }
-                else -> share.existingAccountId ?: accountDao.insert(Account(name = share.name))
-            }
-            transactionDao.insert(
-                Transaction(
-                    accountId = accountId,
-                    type = if (share.isSelf) TransactionType.SPENT else TransactionType.LOAN_GIVEN,
-                    amountMinor = share.amountMinor,
-                    description = description.ifBlank { "Split" },
-                    date = date
-                )
-            )
-            resultIds.add(accountId)
+    suspend fun applySplit(description: String, shares: List<SplitShare>, payerName: String, date: Long): SplitApplyResult = db.withTransaction {
+        val postedAccountIds = mutableListOf<Long>()
+        val unrecordedParticipants = mutableListOf<String>()
+        val participantRecords = mutableListOf<SplitParticipantRecord>()
+        val totalMinor = shares.sumOf { it.amountMinor }
+        val label = description.ifBlank { "Split" }
+        val payerIsSelf = shares.any { it.isSelf && it.name.equals(payerName, ignoreCase = true) }
+
+        // Resolve (and create if needed) the payer's own account up front, since a non-self payer's
+        // account may not exist yet and multiple other shares might need to post debts to it.
+        var payerAccountId: Long? = null
+        if (!payerIsSelf) {
+            val payerShare = shares.firstOrNull { it.name.equals(payerName, ignoreCase = true) }
+            payerAccountId = payerShare?.existingAccountId ?: accountDao.insert(Account(name = payerName))
         }
-        resultIds
+
+        // If I'm the payer, record the FULL amount up front as one combined entry.
+        var meTransactionId: Long? = null
+        if (payerIsSelf && totalMinor > 0L) {
+            val meId = getOrCreateMeAccount()
+            meTransactionId = transactionDao.insert(
+                Transaction(accountId = meId, type = TransactionType.SPENT, amountMinor = totalMinor, description = label, date = date)
+            )
+            postedAccountIds.add(meId)
+        }
+
+        for (share in shares) {
+            val isPayer = share.name.equals(payerName, ignoreCase = true)
+            var recorded = false
+            var linkedTransactionId: Long? = null
+
+            if (share.amountMinor > 0L) {
+                when {
+                    isPayer && share.isSelf -> {
+                        // Already covered by the combined Me total above.
+                        recorded = true
+                        linkedTransactionId = meTransactionId
+                    }
+                    isPayer -> {
+                        // Someone else paid the whole bill; nothing to record for their own share.
+                    }
+                    share.isSelf -> {
+                        // I owe the payer my share. payerAccountId is always set here since this
+                        // branch only runs when the payer isn't me (payerIsSelf is false).
+                        val payTo = payerAccountId!!
+                        linkedTransactionId = transactionDao.insert(
+                            Transaction(accountId = payTo, type = TransactionType.LOAN_TAKEN, amountMinor = share.amountMinor, description = label, date = date)
+                        )
+                        postedAccountIds.add(payTo)
+                        recorded = true
+                    }
+                    payerIsSelf -> {
+                        // I paid, they owe me.
+                        val accountId = share.existingAccountId ?: accountDao.insert(Account(name = share.name))
+                        linkedTransactionId = transactionDao.insert(
+                            Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = share.amountMinor, description = label, date = date)
+                        )
+                        postedAccountIds.add(accountId)
+                        recorded = true
+                    }
+                    else -> {
+                        // Neither the payer nor me — a debt between two other people this app can't track.
+                        unrecordedParticipants.add(share.name)
+                    }
+                }
+            }
+
+            participantRecords.add(
+                SplitParticipantRecord(splitId = 0, name = share.name, amountMinor = share.amountMinor, isPayer = isPayer, recorded = recorded, transactionId = linkedTransactionId)
+            )
+        }
+
+        val splitId = splitDao.insertRecord(
+            SplitRecord(description = label, totalMinor = totalMinor, payerName = payerName, date = date, meTransactionId = meTransactionId)
+        )
+        splitDao.insertParticipants(participantRecords.map { it.copy(splitId = splitId) })
+
+        SplitApplyResult(postedToAccountIds = postedAccountIds, unrecordedParticipants = unrecordedParticipants)
     }
+
+    fun observeSplitHistory(): Flow<List<com.palan.hisaab.data.dao.SplitRecordWithParticipants>> = splitDao.observeAll()
+
+    /**
+     * For every transaction in [accountId] that's a split's combined "Me" total (see
+     * [applySplit]), recomputes its live remaining amount: my own share stays baked in forever,
+     * plus whatever every other participant still hasn't cleared on their own account. This is a
+     * read-time view, not a stored balance — each participant's own settlement is still the only
+     * place that's actually written to, so it can never drift out of sync with what really
+     * happened on their account.
+     */
+    suspend fun computeSplitTotalOverrides(accountId: Long): Map<Long, Long> {
+        val overrides = mutableMapOf<Long, Long>()
+        for (txn in transactionDao.getForAccountOnce(accountId)) {
+            val record = splitDao.findByMeTransactionId(txn.id) ?: continue
+            if (txn.settled) {
+                overrides[txn.id] = 0L
+                continue
+            }
+            var remaining = 0L
+            for (p in record.participants) {
+                if (p.isPayer) {
+                    remaining += p.amountMinor // my own share is never "recovered"
+                    continue
+                }
+                val linkedId = p.transactionId ?: continue
+                val linked = transactionDao.getById(linkedId) ?: continue
+                remaining += if (linked.settled) 0L
+                    else (linked.amountMinor - repaymentAllocationDao.sumForTarget(linkedId)).coerceAtLeast(0L)
+            }
+            overrides[txn.id] = remaining.coerceAtMost(txn.amountMinor)
+        }
+        return overrides
+    }
+
+    /** One-shot Flow wrapper around [computeSplitTotalOverrides], recomputed fresh whenever the account screen is (re)opened. */
+    fun observeSplitTotalOverridesOnce(accountId: Long): Flow<Map<Long, Long>> = kotlinx.coroutines.flow.flow { emit(computeSplitTotalOverrides(accountId)) }
 
     private suspend fun getOrCreateMeAccount(): Long {
         val existing = accountDao.getAllOnce().firstOrNull { it.name.equals("Me", ignoreCase = true) }
@@ -489,4 +598,10 @@ data class SplitShare(
     val amountMinor: Long,
     val existingAccountId: Long? = null,
     val isSelf: Boolean = false
+)
+
+/** What [HisaabRepository.applySplit] actually did: which accounts got a real transaction posted, and which participants' shares couldn't be (a debt between two people neither of whom is "Me"). */
+data class SplitApplyResult(
+    val postedToAccountIds: List<Long>,
+    val unrecordedParticipants: List<String>
 )

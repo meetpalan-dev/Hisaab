@@ -12,12 +12,14 @@ import com.palan.hisaab.ui.account.AccountScreen
 import com.palan.hisaab.ui.home.HomeScreen
 import com.palan.hisaab.ui.settings.SettingsScreen
 import com.palan.hisaab.ui.split.SplitExpenseScreen
+import com.palan.hisaab.ui.split.SplitHistoryScreen
 
 object Routes {
     const val HOME = "home"
     const val ACCOUNT = "account/{accountId}"
     const val SETTINGS = "settings"
     const val SPLIT = "split"
+    const val SPLIT_HISTORY = "split_history"
     fun account(id: Long) = "account/$id"
 }
 
@@ -57,6 +59,13 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
             SplitExpenseScreen(
                 repository = repository,
                 onDone = { navController.popBackStack(Routes.HOME, inclusive = false) },
+                onBack = { navController.popBackStack() },
+                onOpenHistory = { navController.navigate(Routes.SPLIT_HISTORY) }
+            )
+        }
+        composable(Routes.SPLIT_HISTORY) {
+            SplitHistoryScreen(
+                repository = repository,
                 onBack = { navController.popBackStack() }
             )
         }

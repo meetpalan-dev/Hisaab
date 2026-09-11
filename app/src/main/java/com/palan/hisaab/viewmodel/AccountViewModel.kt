@@ -23,7 +23,9 @@ data class AccountUiState(
     val loanTaken: Long = 0,
     val transactions: List<Transaction> = emptyList(),
     /** Sum of repayment allocations applied against each loan transaction id so far — used to show partial-repayment progress and to compute each row's remaining amount. */
-    val allocatedByTransactionId: Map<Long, Long> = emptyMap()
+    val allocatedByTransactionId: Map<Long, Long> = emptyMap(),
+    /** For a Split's combined "Me" total transaction (see HisaabRepository.applySplit), its live recomputed remaining amount — overrides the normal allocation-based calculation for that one transaction id. Refreshed each time this screen loads. */
+    val splitTotalOverrides: Map<Long, Long> = emptyMap()
 ) {
     val balance: Long get() = initialBalance + received - spent + loanGiven - loanTaken
     val hasLoans: Boolean get() = loanGiven != 0L || loanTaken != 0L
@@ -32,20 +34,24 @@ data class AccountUiState(
      * How much of a transaction is still unpaid via detailed repayment allocations — 0 for
      * a repayment transaction itself and for fully-settled ones. Applies to any Received,
      * Spent, Loan Given, or (legacy) Loan Taken transaction, since any of them can now be
-     * the target of a "Repayment / Settle Hisaab" allocation, not just loans.
+     * the target of a "Repayment / Settle Hisaab" allocation, not just loans. For a Split's
+     * combined "Me" total, uses the live cross-account [splitTotalOverrides] value instead.
      */
     fun remainingFor(t: Transaction): Long {
         if (t.isRepayment || t.type == TransactionType.INITIAL_BALANCE) return 0L
         if (t.settled) return 0L
+        splitTotalOverrides[t.id]?.let { return it }
         val allocated = allocatedByTransactionId[t.id] ?: 0L
         return (t.amountMinor - allocated).coerceAtLeast(0L)
     }
 
-    /** True once some (but not all) of a transaction's amount has been repaid via allocations. */
+    /** True once some (but not all) of a transaction's amount has been repaid via allocations (or, for a Split total, settled elsewhere). */
     fun isPartiallyPaid(t: Transaction): Boolean {
         if (t.isRepayment || t.type == TransactionType.INITIAL_BALANCE) return false
+        if (t.settled) return false
+        splitTotalOverrides[t.id]?.let { remaining -> return remaining in 1 until t.amountMinor }
         val allocated = allocatedByTransactionId[t.id] ?: 0L
-        return !t.settled && allocated > 0L && allocated < t.amountMinor
+        return allocated > 0L && allocated < t.amountMinor
     }
 
     /** Active = outstanding, not yet cleared. Cleared = manually or fully settled. Applies uniformly to every transaction type. */
@@ -61,8 +67,9 @@ class AccountViewModel(
     val uiState: StateFlow<AccountUiState> = combine(
         repository.observeTransactions(accountId),
         repository.observeAccountSummaryById(accountId),
-        repository.observeAllocatedSums(accountId)
-    ) { transactions, summary, allocated ->
+        repository.observeAllocatedSums(accountId),
+        repository.observeSplitTotalOverridesOnce(accountId)
+    ) { transactions, summary, allocated, splitOverrides ->
         AccountUiState(
             accountName = summary.account.name,
             phoneNumber = summary.account.phoneNumber,
@@ -72,7 +79,8 @@ class AccountViewModel(
             loanGiven = summary.loanGiven,
             loanTaken = summary.loanTaken,
             transactions = transactions.filter { it.type != TransactionType.INITIAL_BALANCE },
-            allocatedByTransactionId = allocated
+            allocatedByTransactionId = allocated,
+            splitTotalOverrides = splitOverrides
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AccountUiState())
 

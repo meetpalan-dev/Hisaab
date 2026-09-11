@@ -1,6 +1,7 @@
 package com.palan.hisaab.ui.split
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,12 +17,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -76,7 +79,8 @@ private data class Participant(
 fun SplitExpenseScreen(
     repository: HisaabRepository,
     onDone: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenHistory: () -> Unit
 ) {
     var allAccounts by remember { mutableStateOf<List<Account>>(emptyList()) }
     LaunchedEffect(Unit) { allAccounts = repository.getAllAccountsOnce() }
@@ -86,6 +90,17 @@ fun SplitExpenseScreen(
     var mode by remember { mutableStateOf(SplitMode.EVENLY) }
     var participants by remember { mutableStateOf(listOf(Participant(name = "Me", isSelf = true))) }
     var participantInput by remember { mutableStateOf("") }
+    var payerName by remember { mutableStateOf("Me") }
+    var unrecordedNotice by remember { mutableStateOf<List<String>?>(null) }
+
+    // If the current payer gets removed from the participant list, fall back to "Me" (or the
+    // first remaining participant if even "Me" was somehow removed) rather than silently keeping
+    // a payer that no longer exists in this split.
+    LaunchedEffect(participants) {
+        if (participants.none { it.name.equals(payerName, ignoreCase = true) }) {
+            payerName = participants.firstOrNull { it.isSelf }?.name ?: participants.firstOrNull()?.name ?: "Me"
+        }
+    }
 
     val totalMinor = runCatching { Money.rupeeStringToMinor(totalText) }.getOrDefault(0L)
     val coroutineScope = rememberCoroutineScope()
@@ -123,6 +138,11 @@ fun SplitExpenseScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    IconButton(onClick = onOpenHistory) {
+                        Icon(Icons.Filled.History, contentDescription = "Split History")
+                    }
                 }
             )
         },
@@ -132,7 +152,7 @@ fun SplitExpenseScreen(
                     onClick = {
                         val shares = computeShares(mode, totalMinor, participants)
                         coroutineScope.launch {
-                            repository.applySplit(
+                            val result = repository.applySplit(
                                 description = description,
                                 shares = shares.mapIndexed { i, minor ->
                                     SplitShare(
@@ -142,9 +162,14 @@ fun SplitExpenseScreen(
                                         isSelf = participants[i].isSelf
                                     )
                                 },
+                                payerName = payerName,
                                 date = System.currentTimeMillis()
                             )
-                            onDone()
+                            if (result.unrecordedParticipants.isNotEmpty()) {
+                                unrecordedNotice = result.unrecordedParticipants
+                            } else {
+                                onDone()
+                            }
                         }
                     },
                     enabled = totalMinor > 0 && participants.isNotEmpty(),
@@ -191,6 +216,25 @@ fun SplitExpenseScreen(
                             onClick = { mode = m },
                             shape = SegmentedButtonDefaults.itemShape(index = index, count = SplitMode.entries.size)
                         ) { Text(m.label) }
+                    }
+                }
+
+                Text(
+                    "Paid by",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = Spacing.section, bottom = 8.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    participants.forEach { p ->
+                        FilterChip(
+                            selected = payerName.equals(p.name, ignoreCase = true),
+                            onClick = { payerName = p.name },
+                            label = { Text(p.name + if (p.isSelf) " (You)" else "") }
+                        )
                     }
                 }
 
@@ -275,6 +319,32 @@ fun SplitExpenseScreen(
                 item { androidx.compose.foundation.layout.Spacer(Modifier.padding(60.dp)) }
             }
         }
+    }
+
+    unrecordedNotice?.let { names ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Split saved") },
+            text = {
+                Column {
+                    Text("Since ${payerName.let { if (it == "Me") "you" else it }} paid, and the amounts below are owed to ${if (payerName == "Me") "you" else payerName}, not you:")
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+                    names.forEach { Text("• $it — not added to their Hisaab") }
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
+                    Text(
+                        "This split is saved in Split History either way, so nothing about it is lost.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    unrecordedNotice = null
+                    onDone()
+                }) { Text("OK") }
+            }
+        )
     }
 }
 
