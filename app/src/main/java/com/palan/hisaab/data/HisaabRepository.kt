@@ -313,9 +313,13 @@ class HisaabRepository(private val db: AppDatabase) {
      *    settled on their own account, so it shrinks automatically toward just my own share as
      *    they pay me back — nothing is ever edited on this transaction directly to make that
      *    happen; my own share simply never counts as "recovered."
-     *  - Everyone else's share becomes a debt *to the payer*. If I'm one of those people, that
-     *    posts as Loan Taken on the payer's account (I owe them). If the payer is Me, each other
-     *    participant's share posts as Loan Given on their account (they owe me).
+     *  - Everyone else's share becomes a debt *to the payer*, recorded as a plain Spent/Received
+     *    entry (never as Loan Given/Taken — Split deliberately avoids that framing, see
+     *    computeSplitStatus). If the payer is Me, each other participant's share posts as Spent on
+     *    their account: I spent that amount on their behalf, so it shows as -₹X there, exactly the
+     *    transaction that occurred. If I'm one of those people instead (someone else paid), my
+     *    share posts as Received on the payer's account: I received that value from them and still
+     *    owe it back, later settled by a Spent repayment.
      *  - A participant who is neither the payer nor "Me" owes the payer, not me — this app's
      *    accounts each track a Me-vs-that-person ledger, so there's no honest place to post a
      *    debt between two other people. That share is left unrecorded (flagged in the result and
@@ -367,20 +371,23 @@ class HisaabRepository(private val db: AppDatabase) {
                         // Someone else paid the whole bill; nothing to record for their own share.
                     }
                     share.isSelf -> {
-                        // I owe the payer my share. payerAccountId is always set here since this
-                        // branch only runs when the payer isn't me (payerIsSelf is false).
+                        // I owe the payer my share -- they covered it for me, so from a plain
+                        // transaction-direction view I "received" that value and still need to
+                        // pay it back (settled later by a Spent repayment). payerAccountId is
+                        // always set here since this branch only runs when the payer isn't me.
                         val payTo = payerAccountId!!
                         linkedTransactionId = transactionDao.insert(
-                            Transaction(accountId = payTo, type = TransactionType.LOAN_TAKEN, amountMinor = share.amountMinor, description = label, date = date)
+                            Transaction(accountId = payTo, type = TransactionType.RECEIVED, amountMinor = share.amountMinor, description = label, date = date)
                         )
                         postedAccountIds.add(payTo)
                         recorded = true
                     }
                     payerIsSelf -> {
-                        // I paid, they owe me.
+                        // I paid, they owe me -- I spent this amount on their behalf, so it's a
+                        // plain Spent entry on their account (settled later by a Received repayment).
                         val accountId = share.existingAccountId ?: accountDao.insert(Account(name = share.name))
                         linkedTransactionId = transactionDao.insert(
-                            Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = share.amountMinor, description = label, date = date)
+                            Transaction(accountId = accountId, type = TransactionType.SPENT, amountMinor = share.amountMinor, description = label, date = date)
                         )
                         postedAccountIds.add(accountId)
                         recorded = true
@@ -407,6 +414,50 @@ class HisaabRepository(private val db: AppDatabase) {
 
     fun observeSplitHistory(): Flow<List<com.palan.hisaab.data.dao.SplitRecordWithParticipants>> = splitDao.observeAll()
 
+    /** Live version of [observeSplitHistory] that also computes each participant's recovered/remaining amount and the split's overall status — used by Split History. */
+    fun observeSplitHistoryWithStatus(): Flow<List<SplitStatusSummary>> =
+        splitDao.observeAll().map { list -> list.map { computeSplitStatus(it) } }
+
+    /** How much of a transaction is still outstanding right now: 0 once settled, otherwise its amount minus whatever's been allocated against it so far. Shared by the split-total override and split-status calculations so they can never disagree with each other. */
+    private suspend fun remainingOf(transaction: Transaction): Long =
+        if (transaction.settled) 0L
+        else (transaction.amountMinor - repaymentAllocationDao.sumForTarget(transaction.id)).coerceAtLeast(0L)
+
+    /**
+     * Computes each participant's recovered/remaining amount (by looking up their linked
+     * transaction's live settlement state, never a stored value) and the split's overall status —
+     * ACTIVE (nothing recovered yet), PARTIALLY_SETTLED, or FULLY_SETTLED once every recoverable
+     * share is in.
+     */
+    suspend fun computeSplitStatus(split: com.palan.hisaab.data.dao.SplitRecordWithParticipants): SplitStatusSummary {
+        var totalRecovered = 0L
+        var totalRemaining = 0L
+        val statuses = split.participants.map { p ->
+            when {
+                p.isPayer -> SplitParticipantStatus(p.name, p.amountMinor, isPayer = true, recorded = p.recorded, recoveredMinor = 0L, remainingMinor = 0L, settled = true)
+                !p.recorded || p.transactionId == null -> SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = false, recoveredMinor = 0L, remainingMinor = 0L, settled = false)
+                else -> {
+                    val linked = transactionDao.getById(p.transactionId)
+                    if (linked == null) {
+                        SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = true, recoveredMinor = 0L, remainingMinor = p.amountMinor, settled = false)
+                    } else {
+                        val remaining = remainingOf(linked)
+                        val recovered = (p.amountMinor - remaining).coerceAtLeast(0L)
+                        totalRecovered += recovered
+                        totalRemaining += remaining
+                        SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = true, recoveredMinor = recovered, remainingMinor = remaining, settled = remaining <= 0L)
+                    }
+                }
+            }
+        }
+        val overall = when {
+            totalRemaining <= 0L && statuses.any { !it.isPayer && it.recorded } -> SplitOverallStatus.FULLY_SETTLED
+            totalRecovered > 0L -> SplitOverallStatus.PARTIALLY_SETTLED
+            else -> SplitOverallStatus.ACTIVE
+        }
+        return SplitStatusSummary(split.record, statuses, totalRecovered, totalRemaining, overall)
+    }
+
     /**
      * For every transaction in [accountId] that's a split's combined "Me" total (see
      * [applySplit]), recomputes its live remaining amount: my own share stays baked in forever,
@@ -431,8 +482,7 @@ class HisaabRepository(private val db: AppDatabase) {
                 }
                 val linkedId = p.transactionId ?: continue
                 val linked = transactionDao.getById(linkedId) ?: continue
-                remaining += if (linked.settled) 0L
-                    else (linked.amountMinor - repaymentAllocationDao.sumForTarget(linkedId)).coerceAtLeast(0L)
+                remaining += remainingOf(linked)
             }
             overrides[txn.id] = remaining.coerceAtMost(txn.amountMinor)
         }
@@ -604,4 +654,26 @@ data class SplitShare(
 data class SplitApplyResult(
     val postedToAccountIds: List<Long>,
     val unrecordedParticipants: List<String>
+)
+
+enum class SplitOverallStatus { ACTIVE, PARTIALLY_SETTLED, FULLY_SETTLED }
+
+/** One participant's live settlement state within a split, for Split History. */
+data class SplitParticipantStatus(
+    val name: String,
+    val amountMinor: Long,
+    val isPayer: Boolean,
+    val recorded: Boolean,
+    val recoveredMinor: Long,
+    val remainingMinor: Long,
+    val settled: Boolean
+)
+
+/** A split's full live status, for Split History — see [HisaabRepository.computeSplitStatus]. */
+data class SplitStatusSummary(
+    val record: SplitRecord,
+    val participants: List<SplitParticipantStatus>,
+    val totalRecoveredMinor: Long,
+    val totalRemainingMinor: Long,
+    val overallStatus: SplitOverallStatus
 )

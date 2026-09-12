@@ -24,10 +24,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.palan.hisaab.data.HisaabRepository
-import com.palan.hisaab.data.dao.SplitRecordWithParticipants
+import com.palan.hisaab.data.SplitOverallStatus
+import com.palan.hisaab.data.SplitParticipantStatus
+import com.palan.hisaab.data.SplitStatusSummary
+import com.palan.hisaab.ui.theme.GreenReceived
+import com.palan.hisaab.ui.theme.RedSpent
 import com.palan.hisaab.ui.theme.Spacing
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.util.toDisplayString
@@ -39,7 +44,7 @@ fun SplitHistoryScreen(
     repository: HisaabRepository,
     onBack: () -> Unit
 ) {
-    val splits by repository.observeSplitHistory().collectAsState(initial = emptyList())
+    val splits by repository.observeSplitHistoryWithStatus().collectAsState(initial = emptyList())
 
     Scaffold(
         topBar = {
@@ -78,7 +83,15 @@ fun SplitHistoryScreen(
 }
 
 @Composable
-private fun SplitHistoryCard(split: SplitRecordWithParticipants) {
+private fun statusLabel(status: SplitOverallStatus): Pair<String, Color> = when (status) {
+    SplitOverallStatus.ACTIVE -> "Active" to MaterialTheme.colorScheme.onSurfaceVariant
+    SplitOverallStatus.PARTIALLY_SETTLED -> "Partially Settled" to MaterialTheme.colorScheme.primary
+    SplitOverallStatus.FULLY_SETTLED -> "Fully Settled" to GreenReceived
+}
+
+@Composable
+private fun SplitHistoryCard(split: SplitStatusSummary) {
+    val (statusText, statusColor) = statusLabel(split.overallStatus)
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
@@ -89,26 +102,49 @@ private fun SplitHistoryCard(split: SplitRecordWithParticipants) {
                 Text(split.record.description, fontWeight = FontWeight.SemiBold)
                 Text(Money.format(split.record.totalMinor), fontWeight = FontWeight.SemiBold)
             }
-            Text(
-                "${Date(split.record.date).toDisplayString()} • Paid by ${split.record.payerName}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    "${Date(split.record.date).toDisplayString()} • Paid by ${split.record.payerName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(statusText, style = MaterialTheme.typography.bodySmall, color = statusColor, fontWeight = FontWeight.SemiBold)
+            }
             androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 6.dp))
             split.participants.sortedByDescending { it.isPayer }.forEach { p ->
+                ParticipantStatusRow(p)
+            }
+            if (split.totalRecoveredMinor > 0L || split.totalRemainingMinor > 0L) {
+                androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 4.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(
-                        p.name + when {
-                            p.isPayer -> " (paid)"
-                            !p.recorded -> " (not tracked)"
-                            else -> ""
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (p.recorded || p.isPayer) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(Money.format(p.amountMinor), style = MaterialTheme.typography.bodySmall)
+                    Text("Recovered: ${Money.format(split.totalRecoveredMinor)}", style = MaterialTheme.typography.labelSmall, color = GreenReceived)
+                    Text("Remaining: ${Money.format(split.totalRemainingMinor)}", style = MaterialTheme.typography.labelSmall, color = RedSpent)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ParticipantStatusRow(p: SplitParticipantStatus) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(
+            p.name + when {
+                p.isPayer -> " (paid)"
+                !p.recorded -> " (not tracked)"
+                p.settled -> " — Settled"
+                p.recoveredMinor > 0L -> " — ${Money.format(p.remainingMinor)} remaining"
+                else -> " — Unsettled"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = when {
+                p.isPayer -> MaterialTheme.colorScheme.onSurface
+                !p.recorded -> MaterialTheme.colorScheme.onSurfaceVariant
+                p.settled -> GreenReceived
+                p.recoveredMinor > 0L -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurface
+            }
+        )
+        Text(Money.format(p.amountMinor), style = MaterialTheme.typography.bodySmall)
     }
 }
