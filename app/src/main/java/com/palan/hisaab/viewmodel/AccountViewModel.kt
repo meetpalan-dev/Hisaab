@@ -24,7 +24,7 @@ data class AccountUiState(
     val transactions: List<Transaction> = emptyList(),
     /** Sum of repayment allocations applied against each loan transaction id so far — used to show partial-repayment progress and to compute each row's remaining amount. */
     val allocatedByTransactionId: Map<Long, Long> = emptyMap(),
-    /** For a Split's combined "Me" total transaction (see HisaabRepository.applySplit), its live recomputed remaining amount — overrides the normal allocation-based calculation for that one transaction id. Refreshed each time this screen loads. */
+    /** For a Split's combined "Me" total transaction (see HisaabRepository.applySplit), its live recomputed remaining amount — overrides the normal allocation-based calculation for that one transaction id. Updates live, including when the recovery happens on a different account entirely. */
     val splitTotalOverrides: Map<Long, Long> = emptyMap()
 ) {
     val balance: Long get() = initialBalance + received - spent + loanGiven - loanTaken
@@ -68,7 +68,7 @@ class AccountViewModel(
         repository.observeTransactions(accountId),
         repository.observeAccountSummaryById(accountId),
         repository.observeAllocatedSums(accountId),
-        repository.observeSplitTotalOverridesOnce(accountId)
+        repository.observeSplitTotalOverrides(accountId)
     ) { transactions, summary, allocated, splitOverrides ->
         AccountUiState(
             accountName = summary.account.name,

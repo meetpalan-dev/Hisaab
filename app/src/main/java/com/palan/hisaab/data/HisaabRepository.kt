@@ -53,7 +53,7 @@ class HisaabRepository(private val db: AppDatabase) {
 
     fun searchTransactions(query: String): Flow<List<Transaction>> = transactionDao.search(query)
 
-    /** Combines the type sums into one summary for a single account (used on Home). Received/Spent exclude repayment transactions; Loan Given/Taken are net of any repayment allocations, so a repayment's balance effect flows entirely through the loan side — never double-counted. */
+    /** Combines the type sums into one summary for a single account (used on Home). Received/Spent exclude repayment transactions; Loan Given/Taken are net of any repayment allocations, so a repayment's balance effect flows entirely through the loan side — never double-counted. Spent is further reduced by [observeSplitRecoveredTotal] for any Split-linked "Me" total this account holds, since that recovery happens as a real transaction on a *different* account and would otherwise never show up here. */
     fun observeAccountSummary(account: Account): Flow<AccountSummary> =
         combine(
             transactionDao.observeSumByType(account.id, TransactionType.INITIAL_BALANCE),
@@ -62,7 +62,9 @@ class HisaabRepository(private val db: AppDatabase) {
             transactionDao.observeOutstandingLoanSum(account.id, TransactionType.LOAN_GIVEN),
             transactionDao.observeOutstandingLoanSum(account.id, TransactionType.LOAN_TAKEN)
         ) { initial, received, spent, loanGiven, loanTaken ->
-            AccountSummary(account, initial, received, spent, loanGiven, loanTaken)
+            LoanSums(initial, received, spent, loanGiven, loanTaken)
+        }.combine(observeSplitRecoveredTotal(account.id)) { sums, splitRecovered ->
+            AccountSummary(account, sums.initial, sums.received, sums.spent - splitRecovered, sums.loanGiven, sums.loanTaken)
         }
 
     fun observeTransactions(accountId: Long): Flow<List<Transaction>> =
@@ -74,7 +76,7 @@ class HisaabRepository(private val db: AppDatabase) {
             rows.associate { it.targetTransactionId to it.allocatedMinor }
         }
 
-    /** Live summary for one account looked up by id (for the Account/Hisab page). */
+    /** Live summary for one account looked up by id (for the Account/Hisab page). Applies the same Split-recovery adjustment to Spent as [observeAccountSummary], so the two screens can never disagree. */
     fun observeAccountSummaryById(accountId: Long): Flow<AccountSummary> =
         accountDao.observeById(accountId).combine(
             combine(
@@ -85,6 +87,8 @@ class HisaabRepository(private val db: AppDatabase) {
                 transactionDao.observeOutstandingLoanSum(accountId, TransactionType.LOAN_TAKEN)
             ) { initial, received, spent, loanGiven, loanTaken ->
                 LoanSums(initial, received, spent, loanGiven, loanTaken)
+            }.combine(observeSplitRecoveredTotal(accountId)) { sums, splitRecovered ->
+                sums.copy(spent = sums.spent - splitRecovered)
             }
         ) { account, sums ->
             AccountSummary(
@@ -424,6 +428,70 @@ class HisaabRepository(private val db: AppDatabase) {
         else (transaction.amountMinor - repaymentAllocationDao.sumForTarget(transaction.id)).coerceAtLeast(0L)
 
     /**
+     * If [txn] is a Split's combined "Me" total (see [applySplit]), computes its live remaining
+     * amount: my own share stays baked in forever, plus whatever every other participant still
+     * hasn't cleared on their own account. Returns null if [txn] isn't one. This is the single
+     * shared calculation behind [computeSplitTotalOverrides] (per-row display),
+     * [observeSplitRecoveredTotal] (account-level balance adjustment), and [computeSplitStatus]
+     * (Split History) — so all three can never drift out of sync with each other.
+     */
+    private suspend fun splitLinkedRemaining(txn: Transaction): Long? {
+        if (txn.type != TransactionType.SPENT) return null
+        val record = splitDao.findByMeTransactionId(txn.id) ?: return null
+        if (txn.settled) return 0L
+        var remaining = 0L
+        for (p in record.participants) {
+            if (p.isPayer) {
+                remaining += p.amountMinor // my own share is never "recovered"
+                continue
+            }
+            val linkedId = p.transactionId ?: continue
+            val linked = transactionDao.getById(linkedId) ?: continue
+            remaining += remainingOf(linked)
+        }
+        return remaining.coerceAtMost(txn.amountMinor)
+    }
+
+    /**
+     * For every transaction in [accountId] that's a split's combined "Me" total (see
+     * [applySplit]), its live remaining amount. This is a read-time view, not a stored balance —
+     * each participant's own settlement is still the only place that's actually written to, so it
+     * can never drift out of sync with what really happened on their account. Built directly off
+     * [TransactionDao.observeForAccount] (a genuine Room query Flow, not a one-shot snapshot) so it
+     * re-emits the moment any transaction anywhere changes — including a settlement recorded on a
+     * completely different account — the same way [observeSplitRecoveredTotal] already does for
+     * the account-level balance. Without this, the balance figure would update live while this
+     * per-row figure sat stale until the screen was reopened.
+     */
+    fun observeSplitTotalOverrides(accountId: Long): Flow<Map<Long, Long>> =
+        transactionDao.observeForAccount(accountId).map { txns ->
+            txns.mapNotNull { txn -> splitLinkedRemaining(txn)?.let { remaining -> txn.id to remaining } }.toMap()
+        }
+
+    /** One-shot suspend snapshot of [observeSplitTotalOverrides] — used where a Flow isn't convenient (e.g. building a confirmation dialog). */
+    suspend fun computeSplitTotalOverrides(accountId: Long): Map<Long, Long> {
+        val overrides = mutableMapOf<Long, Long>()
+        for (txn in transactionDao.getForAccountOnce(accountId)) {
+            val remaining = splitLinkedRemaining(txn) ?: continue
+            overrides[txn.id] = remaining
+        }
+        return overrides
+    }
+
+    /**
+     * Total amount recovered so far via Split-linked "Me" totals in this account — i.e. how much
+     * of the original outlay other participants have actually paid back on their own accounts.
+     * This is what [observeAccountSummary]/[observeAccountSummaryById] subtract from the raw
+     * Spent sum, since that recovery has no transaction of its own in *this* account to naturally
+     * offset it (unlike a normal same-account settlement, where the real repayment transaction
+     * already counts on its own and doesn't need this adjustment).
+     */
+    private fun observeSplitRecoveredTotal(accountId: Long): Flow<Long> =
+        transactionDao.observeForAccount(accountId).map { txns ->
+            txns.sumOf { txn -> splitLinkedRemaining(txn)?.let { remaining -> txn.amountMinor - remaining } ?: 0L }
+        }
+
+    /**
      * Computes each participant's recovered/remaining amount (by looking up their linked
      * transaction's live settlement state, never a stored value) and the split's overall status —
      * ACTIVE (nothing recovered yet), PARTIALLY_SETTLED, or FULLY_SETTLED once every recoverable
@@ -457,40 +525,6 @@ class HisaabRepository(private val db: AppDatabase) {
         }
         return SplitStatusSummary(split.record, statuses, totalRecovered, totalRemaining, overall)
     }
-
-    /**
-     * For every transaction in [accountId] that's a split's combined "Me" total (see
-     * [applySplit]), recomputes its live remaining amount: my own share stays baked in forever,
-     * plus whatever every other participant still hasn't cleared on their own account. This is a
-     * read-time view, not a stored balance — each participant's own settlement is still the only
-     * place that's actually written to, so it can never drift out of sync with what really
-     * happened on their account.
-     */
-    suspend fun computeSplitTotalOverrides(accountId: Long): Map<Long, Long> {
-        val overrides = mutableMapOf<Long, Long>()
-        for (txn in transactionDao.getForAccountOnce(accountId)) {
-            val record = splitDao.findByMeTransactionId(txn.id) ?: continue
-            if (txn.settled) {
-                overrides[txn.id] = 0L
-                continue
-            }
-            var remaining = 0L
-            for (p in record.participants) {
-                if (p.isPayer) {
-                    remaining += p.amountMinor // my own share is never "recovered"
-                    continue
-                }
-                val linkedId = p.transactionId ?: continue
-                val linked = transactionDao.getById(linkedId) ?: continue
-                remaining += remainingOf(linked)
-            }
-            overrides[txn.id] = remaining.coerceAtMost(txn.amountMinor)
-        }
-        return overrides
-    }
-
-    /** One-shot Flow wrapper around [computeSplitTotalOverrides], recomputed fresh whenever the account screen is (re)opened. */
-    fun observeSplitTotalOverridesOnce(accountId: Long): Flow<Map<Long, Long>> = kotlinx.coroutines.flow.flow { emit(computeSplitTotalOverrides(accountId)) }
 
     private suspend fun getOrCreateMeAccount(): Long {
         val existing = accountDao.getAllOnce().firstOrNull { it.name.equals("Me", ignoreCase = true) }

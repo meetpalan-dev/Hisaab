@@ -115,7 +115,8 @@ object HisabDocumentExporter {
         height: Int,
         startY: Float,
         transactions: List<Transaction>,
-        fromIndex: Int
+        fromIndex: Int,
+        splitOverrides: Map<Long, Long>
     ): Int {
         var y = startY
         val rowPaint = Paint().apply { isAntiAlias = true; textSize = 26f }
@@ -124,7 +125,17 @@ object HisabDocumentExporter {
             val txn = transactions[i]
             val dateText = txn.date?.let { Date(it).toDisplayString() } ?: "No date"
             rowPaint.color = if (txn.settled) mutedColor else creamColor
-            val descText = if (txn.settled) "$dateText  ${txn.description}  (Cleared)" else "$dateText  ${txn.description}"
+            // Split-linked "Me" totals (see HisaabRepository.applySplit) are never edited in
+            // place, so this line always shows the original amount below -- this note is the only
+            // place this row reflects how much of it has actually been recovered elsewhere.
+            val splitNote = splitOverrides[txn.id]?.let { remaining ->
+                when {
+                    remaining <= 0L -> "  [fully recovered]"
+                    remaining < txn.amountMinor -> "  [${Money.format(remaining)} still outstanding]"
+                    else -> ""
+                }
+            } ?: ""
+            val descText = if (txn.settled) "$dateText  ${txn.description}  (Cleared)$splitNote" else "$dateText  ${txn.description}$splitNote"
             canvas.drawText(descText, MARGIN, y, rowPaint)
 
             val isPositive = txn.type == TransactionType.RECEIVED || txn.type == TransactionType.LOAN_GIVEN
@@ -154,7 +165,7 @@ object HisabDocumentExporter {
         var pageNumber = 1
         do {
             val startY = drawHeader(scratchCanvas, PAGE_WIDTH, accountName, state, pageNumber, totalPages = 1)
-            val nextIndex = drawTransactionRows(scratchCanvas, PAGE_WIDTH, PAGE_HEIGHT, startY, transactions, index)
+            val nextIndex = drawTransactionRows(scratchCanvas, PAGE_WIDTH, PAGE_HEIGHT, startY, transactions, index, state.splitTotalOverrides)
             index = nextIndex
             pageNumber++
             if (index < transactions.size) starts.add(index)
@@ -174,7 +185,7 @@ object HisabDocumentExporter {
             val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, i + 1).create()
             val page = document.startPage(pageInfo)
             val startY = drawHeader(page.canvas, PAGE_WIDTH, accountName, state, i + 1, totalPages)
-            drawTransactionRows(page.canvas, PAGE_WIDTH, PAGE_HEIGHT, startY, transactions, fromIndex)
+            drawTransactionRows(page.canvas, PAGE_WIDTH, PAGE_HEIGHT, startY, transactions, fromIndex, state.splitTotalOverrides)
             document.finishPage(page)
         }
 
@@ -196,7 +207,7 @@ object HisabDocumentExporter {
             val bitmap = Bitmap.createBitmap(PAGE_WIDTH, PAGE_HEIGHT, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             val startY = drawHeader(canvas, PAGE_WIDTH, accountName, state, i + 1, totalPages)
-            drawTransactionRows(canvas, PAGE_WIDTH, PAGE_HEIGHT, startY, transactions, fromIndex)
+            drawTransactionRows(canvas, PAGE_WIDTH, PAGE_HEIGHT, startY, transactions, fromIndex, state.splitTotalOverrides)
 
             val suffix = if (totalPages > 1) "_page${i + 1}" else ""
             val file = File(dir, "${sanitize(accountName)}_hisab$suffix.png")

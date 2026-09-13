@@ -647,7 +647,19 @@ private fun buildShareText(state: AccountUiState): String {
             TransactionType.LOAN_TAKEN -> if (txn.settled) " (Loan taken, Paid)" else " (Loan taken)"
             else -> if (txn.isRepayment) " (Repayment)" else ""
         }
-        sb.appendLine("$dateText - ${txn.description}$typeSuffix - $sign ${Money.format(txn.amountMinor, withSymbol = true)}")
+        // Split-linked "Me" totals (see HisaabRepository.applySplit) are never edited in place, so
+        // the line above always shows the original amount — this note is the only place the text
+        // export reflects how much of it has actually been recovered elsewhere, matching what the
+        // on-screen row already shows via its "Remaining ₹X" label. Additive only: it doesn't touch
+        // the Loan suffix format above, which HisabTextImporter still depends on for round-tripping.
+        val splitNote = state.splitTotalOverrides[txn.id]?.let { remaining ->
+            when {
+                remaining <= 0L -> " [fully recovered]"
+                remaining < txn.amountMinor -> " [${Money.format(remaining)} still outstanding]"
+                else -> ""
+            }
+        } ?: ""
+        sb.appendLine("$dateText - ${txn.description}$typeSuffix$splitNote - $sign ${Money.format(txn.amountMinor, withSymbol = true)}")
     }
     sb.appendLine()
     sb.appendLine("Received Total: ${Money.format(state.received)}")

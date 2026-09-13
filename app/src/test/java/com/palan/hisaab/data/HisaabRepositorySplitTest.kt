@@ -167,4 +167,44 @@ class HisaabRepositorySplitTest {
         val finalSplit = repository.observeSplitHistoryWithStatus().first().single()
         assertEquals(SplitOverallStatus.FULLY_SETTLED, finalSplit.overallStatus)
     }
+
+    // -- The actual bug this fix addresses: the ACCOUNT-LEVEL balance (not just the row's
+    // "remaining" label) must reflect the recovery too. Previously the row displayed correctly
+    // but the account's own Spent/Balance totals kept counting the full original amount forever. --
+    @Test
+    fun accountLevelBalance_reflectsSplitRecovery_notJustTheRowLabel() = runTest {
+        repository.applySplit(
+            description = "Dinner",
+            shares = listOf(
+                SplitShare(name = "Me", amountMinor = rupees(250), isSelf = true),
+                SplitShare(name = "A", amountMinor = rupees(250))
+            ),
+            payerName = "Me",
+            date = 0L
+        )
+        val aAccount = db.accountDao().getAllOnce().first { it.name == "A" }
+        val meAccount = db.accountDao().getAllOnce().first { it.name == "Me" }
+
+        val beforeById = repository.observeAccountSummaryById(meAccount.id).first()
+        val beforeList = repository.observeAccountSummary(meAccount).first()
+        assertEquals(rupees(500), beforeById.spent)
+        assertEquals(-rupees(500), beforeById.balance)
+        assertEquals(beforeById.spent, beforeList.spent) // Home list and Account screen must agree
+
+        repository.settleHisaab(aAccount.id, TransactionType.RECEIVED, rupees(100), "A paid some", null)
+
+        val afterPartialById = repository.observeAccountSummaryById(meAccount.id).first()
+        val afterPartialList = repository.observeAccountSummary(meAccount).first()
+        assertEquals(rupees(400), afterPartialById.spent)
+        assertEquals(-rupees(400), afterPartialById.balance)
+        assertEquals(afterPartialById.spent, afterPartialList.spent)
+
+        repository.settleHisaab(aAccount.id, TransactionType.RECEIVED, rupees(150), "A paid the rest", null)
+
+        val afterFullById = repository.observeAccountSummaryById(meAccount.id).first()
+        val afterFullList = repository.observeAccountSummary(meAccount).first()
+        assertEquals(rupees(250), afterFullById.spent) // down to just my own share
+        assertEquals(-rupees(250), afterFullById.balance)
+        assertEquals(afterFullById.spent, afterFullList.spent)
+    }
 }
