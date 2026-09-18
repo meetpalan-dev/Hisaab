@@ -53,14 +53,14 @@ class HisaabRepository(private val db: AppDatabase) {
 
     fun searchTransactions(query: String): Flow<List<Transaction>> = transactionDao.search(query)
 
-    /** Combines the type sums into one summary for a single account (used on Home). Received/Spent exclude repayment transactions; Loan Given/Taken are net of any repayment allocations, so a repayment's balance effect flows entirely through the loan side — never double-counted. Spent is further reduced by [observeSplitRecoveredTotal] for any Split-linked "Me" total this account holds, since that recovery happens as a real transaction on a *different* account and would otherwise never show up here. */
+    /** Combines the type sums into one summary for a single account (used on Home). Received/Spent exclude repayment transactions; Loan Given (SPENT+isLoan) and Loan Taken (RECEIVED+isLoan) are net of any repayment allocations, so a repayment's balance effect flows entirely through the loan side — never double-counted. Spent is further reduced by [observeSplitRecoveredTotal] for any Split-linked "Me" total this account holds, since that recovery happens as a real transaction on a *different* account and would otherwise never show up here. */
     fun observeAccountSummary(account: Account): Flow<AccountSummary> =
         combine(
             transactionDao.observeSumByType(account.id, TransactionType.INITIAL_BALANCE),
             transactionDao.observeIncomeExpenseSum(account.id, TransactionType.RECEIVED),
             transactionDao.observeIncomeExpenseSum(account.id, TransactionType.SPENT),
-            transactionDao.observeOutstandingLoanSum(account.id, TransactionType.LOAN_GIVEN),
-            transactionDao.observeOutstandingLoanSum(account.id, TransactionType.LOAN_TAKEN)
+            transactionDao.observeOutstandingLoanSum(account.id, TransactionType.SPENT),
+            transactionDao.observeOutstandingLoanSum(account.id, TransactionType.RECEIVED)
         ) { initial, received, spent, loanGiven, loanTaken ->
             LoanSums(initial, received, spent, loanGiven, loanTaken)
         }.combine(observeSplitRecoveredTotal(account.id)) { sums, splitRecovered ->
@@ -83,8 +83,8 @@ class HisaabRepository(private val db: AppDatabase) {
                 transactionDao.observeSumByType(accountId, TransactionType.INITIAL_BALANCE),
                 transactionDao.observeIncomeExpenseSum(accountId, TransactionType.RECEIVED),
                 transactionDao.observeIncomeExpenseSum(accountId, TransactionType.SPENT),
-                transactionDao.observeOutstandingLoanSum(accountId, TransactionType.LOAN_GIVEN),
-                transactionDao.observeOutstandingLoanSum(accountId, TransactionType.LOAN_TAKEN)
+                transactionDao.observeOutstandingLoanSum(accountId, TransactionType.SPENT),
+                transactionDao.observeOutstandingLoanSum(accountId, TransactionType.RECEIVED)
             ) { initial, received, spent, loanGiven, loanTaken ->
                 LoanSums(initial, received, spent, loanGiven, loanTaken)
             }.combine(observeSplitRecoveredTotal(accountId)) { sums, splitRecovered ->
@@ -182,24 +182,64 @@ class HisaabRepository(private val db: AppDatabase) {
      */
     suspend fun toggleSettled(transaction: Transaction) = setSettled(transaction, !transaction.settled)
 
-    /** Sets a transaction's Active/Cleared status explicitly — used by the swipe gesture and its Undo, where flipping relative to a possibly-stale [Transaction] snapshot would be unreliable. A no-op if it's already in the requested state. */
-    suspend fun setSettled(transaction: Transaction, settled: Boolean) {
-        if (transaction.settled == settled) return
-        transactionDao.update(transaction.copy(settled = settled, updatedAt = System.currentTimeMillis()))
+    /**
+     * Sets a transaction's Active/Cleared status explicitly — used by the swipe gesture and its
+     * Undo, the Edit Transaction "Mark as Settled" button, and Split Details. A no-op if it's
+     * already in the requested state.
+     *
+     * Marking a transaction Settled is no longer just a status flag — it generates the real
+     * opposite-direction transaction for whatever's still outstanding, tagged "Repayment of X"
+     * and linked via a full allocation, exactly as if Settle Hisaab had been used for that exact
+     * amount. That's what actually moves the account's balance; a boolean alone never should
+     * (marking something Cleared without that money genuinely having moved would be lying about
+     * the balance). Restoring undoes it: the synthesized repayment (and its allocation) is
+     * removed so the amount becomes owed again — unless that repayment also helped cover some
+     * other transaction (e.g. it was later swept up by a broader Settle Hisaab), in which case
+     * only this allocation is removed and the repayment itself is left alone.
+     */
+    suspend fun setSettled(transaction: Transaction, settled: Boolean): Unit = db.withTransaction {
+        if (transaction.settled == settled) return@withTransaction
+        if (settled) {
+            val remaining = remainingOf(transaction)
+            if (remaining > 0L && !transaction.isRepayment && transaction.type != TransactionType.INITIAL_BALANCE) {
+                val repaymentType = if (transaction.type == TransactionType.RECEIVED) TransactionType.SPENT else TransactionType.RECEIVED
+                val repaymentId = transactionDao.insert(
+                    Transaction(
+                        accountId = transaction.accountId,
+                        type = repaymentType,
+                        amountMinor = remaining,
+                        description = "Repayment of ${transaction.description}",
+                        date = System.currentTimeMillis(),
+                        isRepayment = true
+                    )
+                )
+                repaymentAllocationDao.insert(
+                    RepaymentAllocation(repaymentTransactionId = repaymentId, targetTransactionId = transaction.id, allocatedAmountMinor = remaining)
+                )
+            }
+            transactionDao.update(transaction.copy(settled = true, updatedAt = System.currentTimeMillis()))
+        } else {
+            for (alloc in repaymentAllocationDao.getForTarget(transaction.id)) {
+                repaymentAllocationDao.delete(alloc)
+                val repayment = transactionDao.getById(alloc.repaymentTransactionId) ?: continue
+                val stillUsed = repaymentAllocationDao.getForRepayment(repayment.id).isNotEmpty()
+                if (!stillUsed) transactionDao.delete(repayment)
+            }
+            transactionDao.update(transaction.copy(settled = false, updatedAt = System.currentTimeMillis()))
+        }
     }
 
     /**
-     * Which outstanding transaction types a repayment of [repaymentType] is eligible to cover,
+     * Which outstanding transaction type a repayment of [repaymentType] is eligible to cover,
      * based on direction — a SPENT repayment (you're paying money out) settles outstanding
-     * RECEIVED transactions (money that came in and is still owed back) or legacy LOAN_TAKEN
-     * ones; a RECEIVED repayment (money is coming back to you) settles outstanding SPENT
-     * transactions (money that went out and is still owed to you) or LOAN_GIVEN ones.
+     * RECEIVED transactions (money that came in and is still owed back, whether or not it's
+     * flagged as a loan); a RECEIVED repayment (money is coming back to you) settles outstanding
+     * SPENT transactions (money that went out and is still owed to you). The isLoan flag only
+     * changes how a transaction counts toward the account's balance — it never changes who's
+     * eligible to settle it.
      */
     private fun eligibleTargetTypes(repaymentType: TransactionType): List<TransactionType> =
-        if (repaymentType == TransactionType.SPENT)
-            listOf(TransactionType.RECEIVED, TransactionType.LOAN_TAKEN)
-        else
-            listOf(TransactionType.SPENT, TransactionType.LOAN_GIVEN)
+        if (repaymentType == TransactionType.SPENT) listOf(TransactionType.RECEIVED) else listOf(TransactionType.SPENT)
 
     suspend fun getOutstandingHisaabs(accountId: Long, repaymentType: TransactionType): List<OutstandingHisaab> =
         repaymentAllocationDao.getOutstanding(accountId, eligibleTargetTypes(repaymentType))
@@ -295,6 +335,15 @@ class HisaabRepository(private val db: AppDatabase) {
 
     suspend fun deleteAccount(account: Account) {
         accountDao.delete(account) // CASCADE removes its transactions
+    }
+
+    /** Deletes several accounts at once — the protected "Me" account is skipped even if it's somehow included, as a second line of defense beyond the UI already excluding it from selection. All-or-nothing: either every eligible account (and its transactions, via cascade) is removed, or none are. */
+    suspend fun deleteAccounts(accountIds: List<Long>) = db.withTransaction {
+        for (id in accountIds) {
+            val account = accountDao.getById(id) ?: continue
+            if (account.name.equals("Me", ignoreCase = true)) continue
+            accountDao.delete(account)
+        }
     }
 
     suspend fun renameAccount(account: Account, newName: String) {
@@ -502,18 +551,18 @@ class HisaabRepository(private val db: AppDatabase) {
         var totalRemaining = 0L
         val statuses = split.participants.map { p ->
             when {
-                p.isPayer -> SplitParticipantStatus(p.name, p.amountMinor, isPayer = true, recorded = p.recorded, recoveredMinor = 0L, remainingMinor = 0L, settled = true)
-                !p.recorded || p.transactionId == null -> SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = false, recoveredMinor = 0L, remainingMinor = 0L, settled = false)
+                p.isPayer -> SplitParticipantStatus(p.name, p.amountMinor, isPayer = true, recorded = p.recorded, recoveredMinor = 0L, remainingMinor = 0L, settled = true, transactionId = p.transactionId)
+                !p.recorded || p.transactionId == null -> SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = false, recoveredMinor = 0L, remainingMinor = 0L, settled = false, transactionId = null)
                 else -> {
                     val linked = transactionDao.getById(p.transactionId)
                     if (linked == null) {
-                        SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = true, recoveredMinor = 0L, remainingMinor = p.amountMinor, settled = false)
+                        SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = true, recoveredMinor = 0L, remainingMinor = p.amountMinor, settled = false, transactionId = p.transactionId)
                     } else {
                         val remaining = remainingOf(linked)
                         val recovered = (p.amountMinor - remaining).coerceAtLeast(0L)
                         totalRecovered += recovered
                         totalRemaining += remaining
-                        SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = true, recoveredMinor = recovered, remainingMinor = remaining, settled = remaining <= 0L)
+                        SplitParticipantStatus(p.name, p.amountMinor, isPayer = false, recorded = true, recoveredMinor = recovered, remainingMinor = remaining, settled = remaining <= 0L, transactionId = p.transactionId)
                     }
                 }
             }
@@ -524,6 +573,46 @@ class HisaabRepository(private val db: AppDatabase) {
             else -> SplitOverallStatus.ACTIVE
         }
         return SplitStatusSummary(split.record, statuses, totalRecovered, totalRemaining, overall)
+    }
+
+    /**
+     * If [transactionId] belongs to a Split — either the payer's combined total or a single
+     * participant's own linked share — returns that split's full record. Used so tapping any
+     * Split-related transaction opens Split Details instead of the generic Edit Transaction
+     * dialog; null means it's just an ordinary transaction.
+     */
+    suspend fun findSplitForTransaction(transactionId: Long): com.palan.hisaab.data.dao.SplitRecordWithParticipants? =
+        splitDao.findByMeTransactionId(transactionId) ?: splitDao.findByParticipantTransactionId(transactionId)
+
+    /** Live, always-current status for one split — Split Details reads from this so it updates the moment a linked settlement happens anywhere, not just when this split's own rows change. */
+    fun observeSplitStatus(splitId: Long): Flow<SplitStatusSummary?> =
+        splitDao.observeById(splitId).combine(transactionDao.observeChangeMarker()) { record, _ ->
+            record?.let { computeSplitStatus(it) }
+        }
+
+    /** Every repayment applied against [targetTransactionId], oldest first — the "Settlement History" list on Split Details. */
+    suspend fun getSettlementHistory(targetTransactionId: Long): List<Pair<Transaction, Long>> =
+        repaymentAllocationDao.getForTarget(targetTransactionId)
+            .mapNotNull { alloc -> transactionDao.getById(alloc.repaymentTransactionId)?.let { it to alloc.allocatedAmountMinor } }
+            .sortedBy { (t, _) -> t.date ?: 0L }
+
+    /**
+     * Renames a Split — updates the description on the SplitRecord and every transaction linked
+     * to it (the payer's combined total and each participant's own share), so the name stays
+     * consistent everywhere it's shown. Amounts, participants, and the payer are intentionally
+     * not editable here: changing those after settlements have already happened against the
+     * original shares would require re-deriving every allocation, which risks silently
+     * misrepresenting money that's already moved.
+     */
+    suspend fun renameSplit(splitId: Long, newDescription: String): Unit = db.withTransaction {
+        val record = splitDao.getRecordById(splitId) ?: return@withTransaction
+        val label = newDescription.trim().ifBlank { record.description }
+        splitDao.updateRecord(record.copy(description = label))
+        record.meTransactionId?.let { id -> transactionDao.getById(id)?.let { transactionDao.update(it.copy(description = label)) } }
+        for (p in splitDao.getParticipantsForSplit(splitId)) {
+            val txnId = p.transactionId ?: continue
+            transactionDao.getById(txnId)?.let { transactionDao.update(it.copy(description = label)) }
+        }
     }
 
     private suspend fun getOrCreateMeAccount(): Long {
@@ -549,6 +638,7 @@ class HisaabRepository(private val db: AppDatabase) {
                 tObj.put("category", t.category ?: org.json.JSONObject.NULL)
                 tObj.put("settled", t.settled)
                 tObj.put("isRepayment", t.isRepayment)
+                tObj.put("isLoan", t.isLoan)
                 txnArr.put(tObj)
             }
             accObj.put("transactions", txnArr)
@@ -560,7 +650,7 @@ class HisaabRepository(private val db: AppDatabase) {
         return root.toString(2)
     }
 
-    /** Restores accounts + transactions from a backup produced by [exportAllToJson]. Always creates new accounts (never merges into existing ones), so re-importing is safe. Older backups (pre-repayment feature) simply have no "isRepayment" field, which defaults to false. Repayment allocation links themselves aren't part of the backup, so a restored repayment transaction comes back as a plain flagged transaction with its settlements already baked into each loan's "settled" state at export time — nothing is lost balance-wise. Returns the number of accounts restored. */
+    /** Restores accounts + transactions from a backup produced by [exportAllToJson]. Always creates new accounts (never merges into existing ones), so re-importing is safe. Older backups (pre-repayment feature, or pre-isLoan) simply lack those fields, which default to false — a backup taken before the Loan Given/Loan Taken types were folded into isLoan restores as plain, non-loan transactions. Repayment allocation links themselves aren't part of the backup, so a restored repayment transaction comes back as a plain flagged transaction with its settlements already baked into each loan's "settled" state at export time — nothing is lost balance-wise. Returns the number of accounts restored. */
     suspend fun importFromJson(json: String): Int {
         val root = org.json.JSONObject(json)
         val accountsArr = root.optJSONArray("accounts") ?: return 0
@@ -574,7 +664,16 @@ class HisaabRepository(private val db: AppDatabase) {
             val txnArr = accObj.optJSONArray("transactions") ?: org.json.JSONArray()
             for (j in 0 until txnArr.length()) {
                 val tObj = txnArr.getJSONObject(j)
-                val type = runCatching { TransactionType.valueOf(tObj.getString("type")) }.getOrNull() ?: continue
+                val rawType = tObj.getString("type")
+                // Old backups (pre-isLoan) may still say "LOAN_GIVEN"/"LOAN_TAKEN" — those values
+                // no longer exist on TransactionType, so map them the same way MIGRATION_6_7 does
+                // for the database itself: SPENT/RECEIVED with isLoan implied true.
+                val legacyIsLoan = rawType == "LOAN_GIVEN" || rawType == "LOAN_TAKEN"
+                val type = when (rawType) {
+                    "LOAN_GIVEN" -> TransactionType.SPENT
+                    "LOAN_TAKEN" -> TransactionType.RECEIVED
+                    else -> runCatching { TransactionType.valueOf(rawType) }.getOrNull() ?: continue
+                }
                 transactionDao.insert(
                     Transaction(
                         accountId = accountId,
@@ -584,7 +683,8 @@ class HisaabRepository(private val db: AppDatabase) {
                         date = if (tObj.isNull("date")) null else tObj.optLong("date"),
                         category = if (tObj.isNull("category")) null else tObj.optString("category"),
                         settled = tObj.optBoolean("settled", false),
-                        isRepayment = tObj.optBoolean("isRepayment", false)
+                        isRepayment = tObj.optBoolean("isRepayment", false),
+                        isLoan = tObj.optBoolean("isLoan", legacyIsLoan)
                     )
                 )
             }
@@ -611,20 +711,15 @@ class HisaabRepository(private val db: AppDatabase) {
             )
         }
         parsed.transactions.forEach { txn ->
-            val type = when {
-                txn.isLoan && txn.isSpent -> TransactionType.LOAN_TAKEN   // "-" sign -> you owe them
-                txn.isLoan && !txn.isSpent -> TransactionType.LOAN_GIVEN  // "+" sign -> they owe you
-                txn.isSpent -> TransactionType.SPENT
-                else -> TransactionType.RECEIVED
-            }
             transactionDao.insert(
                 Transaction(
                     accountId = accountId,
-                    type = type,
+                    type = if (txn.isSpent) TransactionType.SPENT else TransactionType.RECEIVED,
                     amountMinor = txn.amountMinor,
                     description = txn.description,
                     date = txn.dateMillis,
-                    settled = txn.isSettled
+                    settled = txn.isSettled,
+                    isLoan = txn.isLoan
                 )
             )
         }
@@ -647,17 +742,13 @@ class HisaabRepository(private val db: AppDatabase) {
         val existing = transactionDao.getForAccountOnce(accountId)
         var added = 0
         parsed.transactions.forEach { txn ->
-            val type = when {
-                txn.isLoan && txn.isSpent -> TransactionType.LOAN_TAKEN
-                txn.isLoan && !txn.isSpent -> TransactionType.LOAN_GIVEN
-                txn.isSpent -> TransactionType.SPENT
-                else -> TransactionType.RECEIVED
-            }
+            val type = if (txn.isSpent) TransactionType.SPENT else TransactionType.RECEIVED
             val isDuplicate = existing.any {
                 it.date == txn.dateMillis &&
                     it.amountMinor == txn.amountMinor &&
                     it.description.equals(txn.description, ignoreCase = true) &&
-                    it.type == type
+                    it.type == type &&
+                    it.isLoan == txn.isLoan
             }
             if (!isDuplicate) {
                 transactionDao.insert(
@@ -667,7 +758,8 @@ class HisaabRepository(private val db: AppDatabase) {
                         amountMinor = txn.amountMinor,
                         description = txn.description,
                         date = txn.dateMillis,
-                        settled = txn.isSettled
+                        settled = txn.isSettled,
+                        isLoan = txn.isLoan
                     )
                 )
                 added++
@@ -700,7 +792,9 @@ data class SplitParticipantStatus(
     val recorded: Boolean,
     val recoveredMinor: Long,
     val remainingMinor: Long,
-    val settled: Boolean
+    val settled: Boolean,
+    /** The transaction id this participant's share actually posted to (their own account's Spent/Received entry, or the payer's combined total for the payer's own row) — null when [recorded] is false. Used to look up settlement history for this specific participant. */
+    val transactionId: Long? = null
 )
 
 /** A split's full live status, for Split History — see [HisaabRepository.computeSplitStatus]. */

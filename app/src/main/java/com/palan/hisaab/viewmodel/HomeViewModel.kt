@@ -72,4 +72,12 @@ class HomeViewModel(private val repository: HisaabRepository) : ViewModel() {
     fun mergeHisab(accountId: Long, parsed: ParsedHisab, onMerged: (addedCount: Int) -> Unit) {
         viewModelScope.launch { onMerged(repository.mergeParsedHisab(accountId, parsed)) }
     }
+
+    /** Deletes several accounts at once (the protected "Me" account is skipped even if included). */
+    fun deleteAccounts(accountIds: Set<Long>, onDone: () -> Unit) {
+        viewModelScope.launch {
+            repository.deleteAccounts(accountIds.toList())
+            onDone()
+        }
+    }
 }

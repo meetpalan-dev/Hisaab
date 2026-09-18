@@ -138,9 +138,9 @@ object HisabDocumentExporter {
             val descText = if (txn.settled) "$dateText  ${txn.description}  (Cleared)$splitNote" else "$dateText  ${txn.description}$splitNote"
             canvas.drawText(descText, MARGIN, y, rowPaint)
 
-            val isPositive = txn.type == TransactionType.RECEIVED || txn.type == TransactionType.LOAN_GIVEN
+            val isPositive = (txn.type == TransactionType.RECEIVED && !txn.isLoan) || (txn.type == TransactionType.SPENT && txn.isLoan)
             rowPaint.color = if (txn.settled) mutedColor else if (isPositive) greenColor else redColor
-            val amountText = Money.formatSigned(txn.amountMinor, txn.type)
+            val amountText = Money.formatSigned(txn.amountMinor, txn.type, txn.isLoan)
             canvas.drawText(amountText, width - MARGIN - rowPaint.measureText(amountText), y, rowPaint)
             y += ROW_HEIGHT
             i++

@@ -19,7 +19,7 @@ import com.palan.hisaab.data.entity.Transaction
 
 @Database(
     entities = [Account::class, Transaction::class, RepaymentAllocation::class, SplitRecord::class, SplitParticipantRecord::class],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -105,13 +105,29 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Removes LOAN_GIVEN/LOAN_TAKEN as separate transaction types, folding them into
+         * Transaction.isLoan on a plain SPENT/RECEIVED row instead — see that field's doc comment
+         * for the sign rules this preserves. Every existing LOAN_GIVEN row becomes SPENT+isLoan,
+         * every LOAN_TAKEN row becomes RECEIVED+isLoan; nothing about the row's amount, date,
+         * settled state, or its repayment allocations changes, so its outstanding/history status
+         * carries over exactly as it was.
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN isLoan INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE transactions SET isLoan = 1, type = 'SPENT' WHERE type = 'LOAN_GIVEN'")
+                db.execSQL("UPDATE transactions SET isLoan = 1, type = 'RECEIVED' WHERE type = 'LOAN_TAKEN'")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "hisaab.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build().also { INSTANCE = it }
             }
         }
     }

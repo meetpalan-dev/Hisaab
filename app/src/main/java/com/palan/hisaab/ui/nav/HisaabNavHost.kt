@@ -11,6 +11,7 @@ import com.palan.hisaab.data.SettingsRepository
 import com.palan.hisaab.ui.account.AccountScreen
 import com.palan.hisaab.ui.home.HomeScreen
 import com.palan.hisaab.ui.settings.SettingsScreen
+import com.palan.hisaab.ui.split.SplitDetailsScreen
 import com.palan.hisaab.ui.split.SplitExpenseScreen
 import com.palan.hisaab.ui.split.SplitHistoryScreen
 
@@ -20,7 +21,9 @@ object Routes {
     const val SETTINGS = "settings"
     const val SPLIT = "split"
     const val SPLIT_HISTORY = "split_history"
+    const val SPLIT_DETAILS = "split_details/{splitId}"
     fun account(id: Long) = "account/$id"
+    fun splitDetails(id: Long) = "split_details/$id"
 }
 
 @Composable
@@ -46,7 +49,8 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
                 repository = repository,
                 settingsRepository = settingsRepository,
                 accountId = accountId,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onOpenSplitDetails = { splitId -> navController.navigate(Routes.splitDetails(splitId)) }
             )
         }
         composable(Routes.SETTINGS) {
@@ -66,6 +70,18 @@ fun HisaabNavHost(repository: HisaabRepository, settingsRepository: SettingsRepo
         composable(Routes.SPLIT_HISTORY) {
             SplitHistoryScreen(
                 repository = repository,
+                onBack = { navController.popBackStack() },
+                onOpenSplitDetails = { splitId -> navController.navigate(Routes.splitDetails(splitId)) }
+            )
+        }
+        composable(
+            route = Routes.SPLIT_DETAILS,
+            arguments = listOf(navArgument("splitId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val splitId = backStackEntry.arguments?.getLong("splitId") ?: 0L
+            SplitDetailsScreen(
+                repository = repository,
+                splitId = splitId,
                 onBack = { navController.popBackStack() }
             )
         }

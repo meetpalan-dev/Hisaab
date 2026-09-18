@@ -36,12 +36,15 @@ object Money {
         return if (withSymbol) "₹$formatted" else formatted
     }
 
-    fun formatSigned(minor: Long, type: com.palan.hisaab.data.entity.TransactionType): String {
+    /**
+     * [isLoan] flips the sign relative to the plain type — a SPENT+isLoan transaction is the old
+     * "Loan Given" (shows "+", a receivable) and a RECEIVED+isLoan one is the old "Loan Taken"
+     * (shows "-", a liability) — see [com.palan.hisaab.data.entity.Transaction.isLoan].
+     */
+    fun formatSigned(minor: Long, type: com.palan.hisaab.data.entity.TransactionType, isLoan: Boolean = false): String {
         val prefix = when (type) {
-            com.palan.hisaab.data.entity.TransactionType.RECEIVED -> "+ "
-            com.palan.hisaab.data.entity.TransactionType.SPENT -> "- "
-            com.palan.hisaab.data.entity.TransactionType.LOAN_GIVEN -> "+ "
-            com.palan.hisaab.data.entity.TransactionType.LOAN_TAKEN -> "- "
+            com.palan.hisaab.data.entity.TransactionType.RECEIVED -> if (isLoan) "- " else "+ "
+            com.palan.hisaab.data.entity.TransactionType.SPENT -> if (isLoan) "+ " else "- "
             com.palan.hisaab.data.entity.TransactionType.INITIAL_BALANCE -> ""
         }
         return prefix + format(minor)

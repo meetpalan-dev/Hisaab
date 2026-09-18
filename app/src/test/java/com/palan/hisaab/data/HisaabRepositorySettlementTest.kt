@@ -21,9 +21,9 @@ import org.robolectric.annotation.Config
  * exercise the SQL the app runs. Amounts are in minor units (paise): rupees(1) == 100L.
  *
  * Direction convention used throughout (matches HisaabRepository.eligibleTargetTypes):
- *  - A SPENT repayment (I'm paying money out) settles outstanding RECEIVED or LOAN_TAKEN targets
+ *  - A SPENT repayment (I'm paying money out) settles outstanding RECEIVED targets (loan-flagged or not)
  *    -- i.e. those represent money *I* owe *them*.
- *  - A RECEIVED repayment (money coming back to me) settles outstanding SPENT or LOAN_GIVEN
+ *  - A RECEIVED repayment (money coming back to me) settles outstanding SPENT targets (loan-flagged or not)
  *    targets -- i.e. those represent money *they* owe *me*.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -150,9 +150,9 @@ class HisaabRepositorySettlementTest {
     @Test
     fun scenarioD_viaLoanGiven_partialRepayment() = runTest {
         val accountId = repository.createAccount("D2", 0L)
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = rupees(500), description = "First", date = null))
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = rupees(500), description = "Second", date = null))
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = rupees(500), description = "Third", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.SPENT, isLoan = true, amountMinor = rupees(500), description = "First", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.SPENT, isLoan = true, amountMinor = rupees(500), description = "Second", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.SPENT, isLoan = true, amountMinor = rupees(500), description = "Third", date = null))
 
         val result = repository.settleHisaab(accountId, TransactionType.RECEIVED, rupees(1000), "They paid me back", null)
 
@@ -164,7 +164,7 @@ class HisaabRepositorySettlementTest {
     @Test
     fun scenarioE_iOweThem_partialPayment() = runTest {
         val accountId = repository.createAccount("E", 0L)
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_TAKEN, amountMinor = rupees(500), description = "Owed to them", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.RECEIVED, isLoan = true, amountMinor = rupees(500), description = "Owed to them", date = null))
 
         val result = repository.settleHisaab(accountId, TransactionType.SPENT, rupees(250), "I paid them back", null)
 
@@ -206,7 +206,7 @@ class HisaabRepositorySettlementTest {
     @Test
     fun scenarioF_loanGiven_reflectsInBalanceAndSummary() = runTest {
         val accountId = repository.createAccount("F", 0L)
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = rupees(500), description = "Loan out", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.SPENT, isLoan = true, amountMinor = rupees(500), description = "Loan out", date = null))
 
         val summary = snapshotSummary(accountId)
         assertEquals(rupees(500), summary.loanGiven)
@@ -217,7 +217,7 @@ class HisaabRepositorySettlementTest {
     @Test
     fun scenarioG_loanTaken_reflectsInBalanceAndSummary() = runTest {
         val accountId = repository.createAccount("G", 0L)
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_TAKEN, amountMinor = rupees(500), description = "Loan in", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.RECEIVED, isLoan = true, amountMinor = rupees(500), description = "Loan in", date = null))
 
         val summary = snapshotSummary(accountId)
         assertEquals(rupees(500), summary.loanTaken)
@@ -243,7 +243,7 @@ class HisaabRepositorySettlementTest {
     @Test
     fun repaymentAgainstLoanGiven_doesNotDoubleCount() = runTest {
         val accountId = repository.createAccount("SyncLoan", 0L)
-        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.LOAN_GIVEN, amountMinor = rupees(500), description = "Loan out", date = null))
+        repository.addTransaction(Transaction(accountId = accountId, type = TransactionType.SPENT, isLoan = true, amountMinor = rupees(500), description = "Loan out", date = null))
         assertEquals(rupees(500), snapshotSummary(accountId).balance)
 
         repository.settleHisaab(accountId, TransactionType.RECEIVED, rupees(500), "They repaid the loan", null)

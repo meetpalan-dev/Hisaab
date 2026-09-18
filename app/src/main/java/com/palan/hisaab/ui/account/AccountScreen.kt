@@ -94,7 +94,8 @@ fun AccountScreen(
     repository: HisaabRepository,
     settingsRepository: SettingsRepository,
     accountId: Long,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenSplitDetails: (Long) -> Unit
 ) {
     val factory = remember {
         viewModelFactory { initializer { AccountViewModel(repository, accountId) } }
@@ -297,7 +298,12 @@ fun AccountScreen(
                                 isPartiallyPaid = state.isPartiallyPaid(txn),
                                 showCategory = settings.showCategories,
                                 swipeDirection = swipeDirection,
-                                onClick = { editingTransaction = txn },
+                                onClick = {
+                                    coroutineScope.launch {
+                                        val split = repository.findSplitForTransaction(txn.id)
+                                        if (split != null) onOpenSplitDetails(split.record.id) else editingTransaction = txn
+                                    }
+                                },
                                 onSwipeAction = { newSettled -> handleQuickSettle(txn, newSettled) }
                             )
                         }
@@ -330,8 +336,8 @@ fun AccountScreen(
             existing = null,
             autoFillTodayDate = settings.autoFillTodayDate,
             onDismiss = { showAddDialog = false },
-            onSave = { type, amountMinor, description, date, category ->
-                viewModel.addTransaction(type, amountMinor, description, date, category)
+            onSave = { type, amountMinor, description, date, category, isLoan ->
+                viewModel.addTransaction(type, amountMinor, description, date, category, isLoan)
                 showAddDialog = false
             },
             onStartRepayment = { type, amountMinor, description, date ->
@@ -348,9 +354,9 @@ fun AccountScreen(
             existing = txn,
             autoFillTodayDate = settings.autoFillTodayDate,
             onDismiss = { editingTransaction = null },
-            onSave = { type, amountMinor, description, date, category ->
+            onSave = { type, amountMinor, description, date, category, isLoan ->
                 viewModel.updateTransaction(
-                    txn.copy(type = type, amountMinor = amountMinor, description = description, date = date, category = category)
+                    txn.copy(type = type, amountMinor = amountMinor, description = description, date = date, category = category, isLoan = isLoan)
                 )
                 editingTransaction = null
             },
@@ -579,11 +585,13 @@ private fun TransactionRow(
     showCategory: Boolean,
     onClick: () -> Unit
 ) {
-    val isPositive = transaction.type == TransactionType.RECEIVED || transaction.type == TransactionType.LOAN_GIVEN
-    val typeLabel = when (transaction.type) {
-        TransactionType.LOAN_GIVEN -> "Loan given"
-        TransactionType.LOAN_TAKEN -> "Loan taken"
-        else -> if (transaction.isRepayment) "Repayment" else null
+    val isPositive = (transaction.type == TransactionType.RECEIVED && !transaction.isLoan) ||
+        (transaction.type == TransactionType.SPENT && transaction.isLoan)
+    val typeLabel = when {
+        transaction.isLoan && transaction.type == TransactionType.SPENT -> "Loan given"
+        transaction.isLoan && transaction.type == TransactionType.RECEIVED -> "Loan taken"
+        transaction.isRepayment -> "Repayment"
+        else -> null
     }
     val dimmed = transaction.settled
     Card(
@@ -623,7 +631,7 @@ private fun TransactionRow(
                 }
             }
             Text(
-                text = Money.formatSigned(transaction.amountMinor, transaction.type),
+                text = Money.formatSigned(transaction.amountMinor, transaction.type, transaction.isLoan),
                 fontWeight = FontWeight.Bold,
                 color = if (dimmed) MaterialTheme.colorScheme.onSurfaceVariant
                         else if (isPositive) GreenReceived else RedSpent
@@ -640,12 +648,13 @@ private fun buildShareText(state: AccountUiState): String {
     sb.appendLine()
     sb.appendLine("Transactions:")
     state.transactions.sortedBy { it.date ?: 0L }.forEach { txn ->
-        val sign = if (txn.type == TransactionType.RECEIVED || txn.type == TransactionType.LOAN_GIVEN) "+" else "-"
+        val sign = if ((txn.type == TransactionType.RECEIVED && !txn.isLoan) || (txn.type == TransactionType.SPENT && txn.isLoan)) "+" else "-"
         val dateText = txn.date?.let { Date(it).toDisplayString() } ?: "No date"
-        val typeSuffix = when (txn.type) {
-            TransactionType.LOAN_GIVEN -> if (txn.settled) " (Loan given, Paid)" else " (Loan given)"
-            TransactionType.LOAN_TAKEN -> if (txn.settled) " (Loan taken, Paid)" else " (Loan taken)"
-            else -> if (txn.isRepayment) " (Repayment)" else ""
+        val typeSuffix = when {
+            txn.isLoan && txn.type == TransactionType.SPENT -> if (txn.settled) " (Loan given, Paid)" else " (Loan given)"
+            txn.isLoan && txn.type == TransactionType.RECEIVED -> if (txn.settled) " (Loan taken, Paid)" else " (Loan taken)"
+            txn.isRepayment -> " (Repayment)"
+            else -> ""
         }
         // Split-linked "Me" totals (see HisaabRepository.applySplit) are never edited in place, so
         // the line above always shows the original amount — this note is the only place the text

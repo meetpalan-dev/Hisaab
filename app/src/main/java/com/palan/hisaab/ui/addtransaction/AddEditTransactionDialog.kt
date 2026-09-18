@@ -40,14 +40,13 @@ val DEFAULT_CATEGORIES = listOf(
 
 private data class TypeOption(val type: TransactionType, val label: String)
 
-// Loan Taken is no longer offered for new transactions — a "received money that's a loan"
-// is now just Received, optionally tagged with the "Loan" category. It's appended back into
-// the picker (further down) only when editing a transaction that's already that legacy type,
-// so old data stays fully editable without reintroducing the type for new entries.
+// Loan Given/Loan Taken are no longer separate transaction types — Received/Spent are the only
+// choices here, with a "Loan" toggle further down flagging either one as a loan instead (see
+// Transaction.isLoan). MIGRATION_6_7 converts every old LOAN_GIVEN/LOAN_TAKEN row before this
+// screen ever loads, so there's no legacy type to special-case here anymore.
 private val TYPE_OPTIONS = listOf(
     TypeOption(TransactionType.RECEIVED, "Received"),
-    TypeOption(TransactionType.SPENT, "Spent"),
-    TypeOption(TransactionType.LOAN_GIVEN, "Loan Given")
+    TypeOption(TransactionType.SPENT, "Spent")
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,7 +55,7 @@ fun AddEditTransactionDialog(
     existing: Transaction?,
     autoFillTodayDate: Boolean,
     onDismiss: () -> Unit,
-    onSave: (type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?) -> Unit,
+    onSave: (type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?, isLoan: Boolean) -> Unit,
     onDelete: (() -> Unit)? = null,
     onToggleSettled: (() -> Unit)? = null,
     /** When set, a new Received/Spent transaction can be marked "Settle Hisaab" — instead of saving normally, this is invoked so the caller can record it and automatically apply it against the account's outstanding hisaab. Only offered when creating a new transaction (not editing one). */
@@ -75,14 +74,11 @@ fun AddEditTransactionDialog(
     var category by remember { mutableStateOf(existing?.category) }
     var showDatePicker by remember { mutableStateOf(false) }
     var isRepayment by remember { mutableStateOf(false) }
+    var isLoan by remember { mutableStateOf(existing?.isLoan ?: false) }
     val repaymentEligible = existing == null && onStartRepayment != null &&
         (type == TransactionType.RECEIVED || type == TransactionType.SPENT)
-    // If editing an existing legacy Loan Taken transaction, keep it selectable so
-    // its type doesn't silently change out from under the user — just don't offer
-    // it as a choice when adding something new.
-    val typeOptions = if (existing?.type == TransactionType.LOAN_TAKEN) {
-        TYPE_OPTIONS + TypeOption(TransactionType.LOAN_TAKEN, "Loan Taken (legacy)")
-    } else TYPE_OPTIONS
+    // A repayment is never itself a new loan — it's the money settling one back.
+    val loanToggleVisible = !(isRepayment && repaymentEligible)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -98,7 +94,7 @@ fun AddEditTransactionDialog(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
                 ) {
-                    items(typeOptions) { option ->
+                    items(TYPE_OPTIONS) { option ->
                         FilterChip(
                             selected = type == option.type,
                             onClick = { type = option.type },
@@ -149,6 +145,24 @@ fun AddEditTransactionDialog(
                     }
                 }
 
+                if (loanToggleVisible) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Loan", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                if (type == TransactionType.SPENT) "A loan you gave — they owe this back to you" else "A loan you took — you owe this back to them",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = isLoan, onCheckedChange = { isLoan = it })
+                    }
+                }
+
                 if (repaymentEligible) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
@@ -188,7 +202,7 @@ fun AddEditTransactionDialog(
                         if (isRepayment && repaymentEligible) {
                             onStartRepayment?.invoke(type, minor, description.trim(), date)
                         } else {
-                            onSave(type, minor, description.trim(), date, category)
+                            onSave(type, minor, description.trim(), date, category, isLoan)
                         }
                     }
                 }

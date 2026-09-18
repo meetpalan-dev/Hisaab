@@ -42,7 +42,8 @@ import java.util.Date
 @Composable
 fun SplitHistoryScreen(
     repository: HisaabRepository,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenSplitDetails: (Long) -> Unit
 ) {
     val splits by repository.observeSplitHistoryWithStatus().collectAsState(initial = emptyList())
 
@@ -75,7 +76,7 @@ fun SplitHistoryScreen(
                 verticalArrangement = Arrangement.spacedBy(Spacing.tight)
             ) {
                 items(splits, key = { it.record.id }) { split ->
-                    SplitHistoryCard(split)
+                    SplitHistoryCard(split, onClick = { onOpenSplitDetails(split.record.id) })
                 }
             }
         }
@@ -90,9 +91,10 @@ private fun statusLabel(status: SplitOverallStatus): Pair<String, Color> = when 
 }
 
 @Composable
-private fun SplitHistoryCard(split: SplitStatusSummary) {
+private fun SplitHistoryCard(split: SplitStatusSummary, onClick: () -> Unit) {
     val (statusText, statusColor) = statusLabel(split.overallStatus)
     Card(
+        onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)

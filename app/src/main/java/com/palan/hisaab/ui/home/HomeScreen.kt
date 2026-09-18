@@ -2,11 +2,8 @@ package com.palan.hisaab.ui.home
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,24 +17,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CallSplit
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -71,7 +69,7 @@ import com.palan.hisaab.viewmodel.HomeViewModel
 import com.palan.hisaab.viewmodel.SettingsViewModel
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeScreen(
     repository: HisaabRepository,
@@ -98,10 +96,17 @@ fun HomeScreen(
     var showCreateDialog by remember { mutableStateOf(false) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var fabExpanded by remember { mutableStateOf(false) }
     var pendingImport by remember { mutableStateOf<com.palan.hisaab.util.ParsedHisab?>(null) }
     var duplicateAccount by remember { mutableStateOf<com.palan.hisaab.data.entity.Account?>(null) }
     var mergeMessage by remember { mutableStateOf<String?>(null) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    fun exitSelectionMode() {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
 
     val exportBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
@@ -123,38 +128,50 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("हिसाब", fontWeight = FontWeight.Bold) },
+                title = {
+                    if (selectionMode) Text("${selectedIds.size} selected", fontWeight = FontWeight.Bold)
+                    else Text("हिसाब", fontWeight = FontWeight.Bold)
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                navigationIcon = {
+                    if (selectionMode) {
+                        IconButton(onClick = { exitSelectionMode() }) {
+                            Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
+                        }
+                    }
+                },
                 actions = {
-                    IconButton(onClick = { showMenu = true }) {
-                        Icon(Icons.Filled.MoreVert, contentDescription = "More")
-                    }
-                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Import Hisab") },
-                            onClick = { showMenu = false; showImportDialog = true }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Export Backup") },
-                            onClick = { showMenu = false; exportBackupLauncher.launch("hisaab_backup.json") }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Import Backup") },
-                            onClick = { showMenu = false; importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
-                        )
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    if (selectionMode) {
+                        IconButton(onClick = { showDeleteConfirm = true }, enabled = selectedIds.isNotEmpty()) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete selected")
+                        }
+                    } else {
+                        IconButton(onClick = { showMenu = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "More")
+                        }
+                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Select Accounts") },
+                                onClick = { showMenu = false; selectionMode = true }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Import Hisab") },
+                                onClick = { showMenu = false; showImportDialog = true }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export Backup") },
+                                onClick = { showMenu = false; exportBackupLauncher.launch("hisaab_backup.json") }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Import Backup") },
+                                onClick = { showMenu = false; importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
+                            )
+                        }
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        }
                     }
                 }
-            )
-        },
-        floatingActionButton = {
-            HomeFab(
-                expanded = fabExpanded,
-                onToggle = { fabExpanded = !fabExpanded },
-                onSplit = { fabExpanded = false; onOpenSplit() },
-                onNewAccount = { fabExpanded = false; showCreateDialog = true }
             )
         }
     ) { padding ->
@@ -175,10 +192,35 @@ fun HomeScreen(
                 )
             )
 
+            if (!selectionMode) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.normal),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = onOpenSplit,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Filled.CallSplit, contentDescription = null, modifier = Modifier.padding(end = 6.dp))
+                        Text("Split Expense")
+                    }
+                    OutlinedButton(
+                        onClick = { showCreateDialog = true },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Filled.PersonAdd, contentDescription = null, modifier = Modifier.padding(end = 6.dp))
+                        Text("New Account")
+                    }
+                }
+                androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 4.dp))
+            }
+
             if (summaries.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "No accounts yet.\nTap + to add Rudra, Cash Balance, or anyone else.",
+                        "No accounts yet.\nUse Split Expense or New Account above.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
@@ -189,7 +231,29 @@ fun HomeScreen(
                     verticalArrangement = Arrangement.spacedBy(Spacing.tight)
                 ) {
                     items(summaries, key = { it.account.id }) { summary ->
-                        AccountCard(summary = summary, onClick = { onOpenAccount(summary.account.id) })
+                        val isMe = summary.account.name.equals("Me", ignoreCase = true)
+                        AccountCard(
+                            summary = summary,
+                            selectionMode = selectionMode,
+                            selected = summary.account.id in selectedIds,
+                            protectedFromDeletion = isMe,
+                            onClick = {
+                                if (selectionMode) {
+                                    if (!isMe) {
+                                        selectedIds = if (summary.account.id in selectedIds) selectedIds - summary.account.id
+                                            else selectedIds + summary.account.id
+                                    }
+                                } else {
+                                    onOpenAccount(summary.account.id)
+                                }
+                            },
+                            onLongClick = {
+                                if (!selectionMode && !isMe) {
+                                    selectionMode = true
+                                    selectedIds = setOf(summary.account.id)
+                                }
+                            }
+                        )
                     }
                     item { androidx.compose.foundation.layout.Spacer(Modifier.padding(40.dp)) }
                 }
@@ -271,72 +335,85 @@ fun HomeScreen(
             confirmButton = { TextButton(onClick = { mergeMessage = null }) { Text("OK") } }
         )
     }
-}
 
-/**
- * Collapsed: a single [+] FAB. Expanded: "Split Expense" and "New Account" extended
- * FABs stack above it. Tapping the main FAB (now showing ×) or either action collapses it again.
- */
-@Composable
-private fun HomeFab(
-    expanded: Boolean,
-    onToggle: () -> Unit,
-    onSplit: () -> Unit,
-    onNewAccount: () -> Unit
-) {
-    Column(horizontalAlignment = Alignment.End) {
-        AnimatedVisibility(
-            visible = expanded,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically()
-        ) {
-            Column(horizontalAlignment = Alignment.End) {
-                ExtendedFloatingActionButton(
-                    onClick = onSplit,
-                    icon = { Icon(Icons.Filled.CallSplit, contentDescription = null) },
-                    text = { Text("Split Expense") },
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
-                androidx.compose.foundation.layout.Spacer(Modifier.padding(4.dp))
-                ExtendedFloatingActionButton(
-                    onClick = onNewAccount,
-                    icon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
-                    text = { Text("New Account") },
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
-                androidx.compose.foundation.layout.Spacer(Modifier.padding(6.dp))
+    if (showDeleteConfirm) {
+        val toDelete = summaries.filter { it.account.id in selectedIds }
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Delete ${selectedIds.size} account${if (selectedIds.size == 1) "" else "s"}?") },
+            text = {
+                Column {
+                    Text("This permanently deletes all transaction history for:")
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 6.dp))
+                    toDelete.forEach { s -> Text("• ${s.account.name} (${Money.format(s.balance)})", style = MaterialTheme.typography.bodySmall) }
+                    androidx.compose.foundation.layout.Spacer(Modifier.padding(top = 6.dp))
+                    Text("This can't be undone.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteAccounts(selectedIds) {
+                        showDeleteConfirm = false
+                        exitSelectionMode()
+                    }
+                }) { Text("Delete Permanently", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
             }
-        }
-        FloatingActionButton(onClick = onToggle) {
-            Icon(
-                if (expanded) Icons.Filled.Close else Icons.Filled.Add,
-                contentDescription = if (expanded) "Close" else "Add"
-            )
-        }
+        )
     }
 }
 
+@ExperimentalFoundationApi
 @Composable
-private fun AccountCard(summary: AccountSummary, onClick: () -> Unit) {
+private fun AccountCard(
+    summary: AccountSummary,
+    selectionMode: Boolean,
+    selected: Boolean,
+    protectedFromDeletion: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
     val isNegative = summary.balance < 0
     Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth()
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer
+        )
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (selectionMode) {
+                if (protectedFromDeletion) {
+                    androidx.compose.foundation.layout.Spacer(Modifier.width(20.dp))
+                } else {
+                    Checkbox(checked = selected, onCheckedChange = { onClick() })
+                }
+                androidx.compose.foundation.layout.Spacer(Modifier.width(4.dp))
+            }
             InitialsAvatar(name = summary.account.name)
             androidx.compose.foundation.layout.Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = summary.account.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = summary.account.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (selectionMode && protectedFromDeletion) {
+                        androidx.compose.foundation.layout.Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Can't delete",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 if (isNegative) {
                     Text(
                         "You owe",

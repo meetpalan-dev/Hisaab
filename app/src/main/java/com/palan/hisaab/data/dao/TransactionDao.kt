@@ -33,7 +33,11 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE id = :id")
     suspend fun getById(id: Long): Transaction?
 
-    /** Used for INITIAL_BALANCE. For RECEIVED/SPENT, use [observeIncomeExpenseSum] instead (nets loan-allocated repayment amounts). For LOAN_GIVEN/LOAN_TAKEN, use [observeOutstandingLoanSum] instead (nets out allocations). */
+    /** Cheap trigger-only query: its actual value is never read, only its re-emission — Room re-runs any Flow query whenever a table it touches changes (insert/update/delete), so combining this into another Flow makes that Flow re-evaluate whenever ANY transaction anywhere changes, including on a completely different account. Used to keep split-status/settlement views live. */
+    @Query("SELECT COUNT(*) FROM transactions")
+    fun observeChangeMarker(): Flow<Int>
+
+    /** Used for INITIAL_BALANCE. For RECEIVED/SPENT, use [observeIncomeExpenseSum] instead (nets loan-allocated repayment amounts). For isLoan=1 RECEIVED/SPENT, use [observeOutstandingLoanSum] instead (nets out allocations). */
     @Query(
         """
         SELECT COALESCE(SUM(amountMinor), 0) FROM transactions
@@ -43,15 +47,16 @@ interface TransactionDao {
     fun observeSumByType(accountId: Long, type: TransactionType): Flow<Long>
 
     /**
-     * RECEIVED/SPENT total. A repayment transaction (isRepayment=1) is a real transaction and
-     * always counts in full here — UNLESS some of its amount was allocated to an outstanding
-     * LOAN_GIVEN/LOAN_TAKEN transaction, in which case that loan-allocated portion is excluded
-     * here because it's already reflected by [observeOutstandingLoanSum] netting the loan's own
-     * outstanding total down. Without this split, a repayment settling a loan would get counted
-     * twice (once here, once via the loan netting), while a repayment settling a plain
-     * Received/Spent hisaab (which has no netting of its own) would otherwise vanish from the
-     * balance entirely if excluded outright — this is the one calculation every screen (list,
-     * balance header, and settlement) reads from, so there's no second, divergent balance logic.
+     * Non-loan RECEIVED/SPENT total (isLoan = 0) — always face value, a historical fact that
+     * never shrinks on its own, except: a repayment transaction (isRepayment=1) is a real
+     * transaction and always counts in full here — UNLESS some of its amount was allocated to an
+     * outstanding isLoan=1 target, in which case that portion is excluded here because it's
+     * already reflected by [observeOutstandingLoanSum] netting that loan's own outstanding total
+     * down. Without this split, a repayment settling a loan would get counted twice (once here,
+     * once via the loan netting), while a repayment settling a plain Received/Spent hisaab (which
+     * has no netting of its own) would otherwise vanish from the balance entirely if excluded
+     * outright — this is the one calculation every screen (list, balance header, and settlement)
+     * reads from, so there's no second, divergent balance logic.
      */
     @Query(
         """
@@ -65,15 +70,22 @@ interface TransactionDao {
             SELECT ra.repaymentTransactionId AS rid, SUM(ra.allocatedAmountMinor) AS loanAllocated
             FROM repayment_allocations ra
             INNER JOIN transactions tgt ON tgt.id = ra.targetTransactionId
-            WHERE tgt.type IN ('LOAN_GIVEN', 'LOAN_TAKEN')
+            WHERE tgt.isLoan = 1
             GROUP BY ra.repaymentTransactionId
         ) loanAlloc ON loanAlloc.rid = t.id
-        WHERE t.accountId = :accountId AND t.type = :type
+        WHERE t.accountId = :accountId AND t.type = :type AND t.isLoan = 0
         """
     )
     fun observeIncomeExpenseSum(accountId: Long, type: TransactionType): Flow<Long>
 
-    /** Outstanding LOAN_GIVEN/LOAN_TAKEN total for this account: each loan transaction's amount minus whatever repayment allocations have already covered, floored at 0, and 0 outright once manually marked settled. */
+    /**
+     * Outstanding total for this account's isLoan=1 transactions of [type] — a SPENT+isLoan
+     * transaction is the old "Loan Given" (a receivable), a RECEIVED+isLoan one is the old "Loan
+     * Taken" (a liability); see [com.palan.hisaab.data.entity.Transaction.isLoan] for the sign
+     * rules HisaabRepository.observeAccountSummary applies to these. Each matching transaction
+     * contributes its amount minus whatever repayment allocations have already covered it,
+     * floored at 0, and 0 outright once manually marked settled.
+     */
     @Query(
         """
         SELECT COALESCE(SUM(
@@ -87,7 +99,7 @@ interface TransactionDao {
             FROM repayment_allocations
             GROUP BY targetTransactionId
         ) alloc ON alloc.targetTransactionId = t.id
-        WHERE t.accountId = :accountId AND t.type = :type
+        WHERE t.accountId = :accountId AND t.type = :type AND t.isLoan = 1
         """
     )
     fun observeOutstandingLoanSum(accountId: Long, type: TransactionType): Flow<Long>

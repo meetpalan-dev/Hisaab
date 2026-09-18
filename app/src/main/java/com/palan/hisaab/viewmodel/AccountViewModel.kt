@@ -84,7 +84,7 @@ class AccountViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AccountUiState())
 
-    fun addTransaction(type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?) {
+    fun addTransaction(type: TransactionType, amountMinor: Long, description: String, date: Long?, category: String?, isLoan: Boolean = false) {
         viewModelScope.launch {
             repository.addTransaction(
                 Transaction(
@@ -93,7 +93,8 @@ class AccountViewModel(
                     amountMinor = amountMinor,
                     description = description,
                     date = date,
-                    category = category
+                    category = category,
+                    isLoan = isLoan
                 )
             )
         }
