@@ -29,6 +29,11 @@ interface SplitDao {
     @Query("SELECT * FROM split_records ORDER BY date DESC, id DESC")
     fun observeAll(): Flow<List<SplitRecordWithParticipants>>
 
+    /** One-shot version of [observeAll], oldest first, for full-backup export. */
+    @Transaction
+    @Query("SELECT * FROM split_records ORDER BY date ASC, id ASC")
+    suspend fun getAllOnce(): List<SplitRecordWithParticipants>
+
     /** Looks up the split (with its full participant breakdown) that a "Me" total-outlay transaction belongs to, if any — used to recompute that transaction's live remaining amount. */
     @Transaction
     @Query("SELECT * FROM split_records WHERE meTransactionId = :transactionId LIMIT 1")

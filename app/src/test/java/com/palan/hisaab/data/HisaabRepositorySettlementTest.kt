@@ -187,9 +187,12 @@ class HisaabRepositorySettlementTest {
         assertEquals(0L, totalOutstanding(accountId, TransactionType.SPENT))
     }
 
-    // -- Manual "Mark as Cleared" still works independently of Settle Hisaab --
+    // -- Manual "Mark as Cleared" now synthesizes the real opposite-direction transaction that
+    // actually clears it (see HisaabRepository.setSettled) — it's no longer a bookkeeping-only
+    // flag, since a transaction claiming to be Cleared with no money having moved would make the
+    // account balance lie. Restoring undoes that synthesized repayment cleanly. --
     @Test
-    fun manualMarkAsCleared_stillWorksIndependently() = runTest {
+    fun manualMarkAsCleared_synthesizesRealRepayment_andRestoreUndoesIt() = runTest {
         val accountId = repository.createAccount("Manual", 0L)
         givenIOweThem(accountId, 300, "Manual clear me")
         val txn = db.transactionDao().getForAccountOnce(accountId).first { it.description == "Manual clear me" }
@@ -198,8 +201,18 @@ class HisaabRepositorySettlementTest {
 
         val updated = db.transactionDao().getById(txn.id)!!
         assertTrue(updated.settled)
-        // No repayment/allocation was created by a manual clear.
+        assertEquals(rupees(300), db.repaymentAllocationDao().sumForTarget(txn.id))
+        val repayment = db.transactionDao().getForAccountOnce(accountId).single { it.isRepayment }
+        assertEquals(TransactionType.SPENT, repayment.type) // txn was RECEIVED, so settling it takes a SPENT repayment
+        assertEquals(rupees(300), repayment.amountMinor)
+        assertEquals("Repayment of Manual clear me", repayment.description)
+
+        repository.setSettled(updated, false)
+
+        val restored = db.transactionDao().getById(txn.id)!!
+        assertTrue(!restored.settled)
         assertEquals(0L, db.repaymentAllocationDao().sumForTarget(txn.id))
+        assertTrue(db.transactionDao().getForAccountOnce(accountId).none { it.isRepayment })
     }
 
     // -- Scenario F: Loan Given reflects in balance + summary consistently --

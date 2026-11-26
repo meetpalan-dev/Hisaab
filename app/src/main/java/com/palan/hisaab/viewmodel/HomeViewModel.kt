@@ -7,6 +7,7 @@ import com.palan.hisaab.data.HisaabRepository
 import com.palan.hisaab.data.entity.Account
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.util.ParsedHisab
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class HomeViewModel(private val repository: HisaabRepository) : ViewModel() {
 
     private val searchQuery = MutableStateFlow("")

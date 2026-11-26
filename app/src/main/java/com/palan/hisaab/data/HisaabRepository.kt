@@ -620,78 +620,236 @@ class HisaabRepository(private val db: AppDatabase) {
         return existing?.id ?: accountDao.insert(Account(name = "Me"))
     }
 
-    /** Full backup of every account and transaction as JSON (used by Export/Import Backup). */
-    suspend fun exportAllToJson(): String {
-        val accounts = accountDao.getAllOnce()
+    /** Full backup of every account, transaction, split, and repayment allocation as JSON (Export Backup). */
+    suspend fun exportAllToJson(): String = buildBackupJson(accountIds = null, onlyTransactionIds = null)
+
+    /**
+     * Single-account export — same format and same code path as the full backup, just scoped to
+     * one account. [onlyTransactionIds], when given, restricts it further to just those
+     * transactions ("export selected"); splits and repayment allocations are included whenever
+     * the transactions they link are, so relationships survive a partial export too.
+     */
+    suspend fun exportAccountToJson(accountId: Long, onlyTransactionIds: Set<Long>? = null): String =
+        buildBackupJson(accountIds = setOf(accountId), onlyTransactionIds = onlyTransactionIds)
+
+    /**
+     * Backup JSON, version 2. Database row ids don't survive a restore (everything is re-inserted
+     * and gets new ids), so every transaction is written with a stable "key" and the splits and
+     * repayment allocations reference those keys instead of raw ids — [restoreFromBackupJson]
+     * rebuilds the links through them. Only links whose both ends are in the export are written,
+     * so a partial export never contains a dangling reference.
+     */
+    private suspend fun buildBackupJson(accountIds: Set<Long>?, onlyTransactionIds: Set<Long>?): String {
+        val accounts = accountDao.getAllOnce().filter { accountIds == null || it.id in accountIds }
+        val keyForTxnId = mutableMapOf<Long, String>()
         val accountsArr = org.json.JSONArray()
-        for (acc in accounts) {
+        accounts.forEachIndexed { ai, acc ->
             val accObj = org.json.JSONObject()
             accObj.put("name", acc.name)
             accObj.put("phoneNumber", acc.phoneNumber ?: org.json.JSONObject.NULL)
             val txnArr = org.json.JSONArray()
-            for (t in transactionDao.getForAccountOnce(acc.id)) {
-                val tObj = org.json.JSONObject()
-                tObj.put("type", t.type.name)
-                tObj.put("amountMinor", t.amountMinor)
-                tObj.put("description", t.description)
-                tObj.put("date", t.date ?: org.json.JSONObject.NULL)
-                tObj.put("category", t.category ?: org.json.JSONObject.NULL)
-                tObj.put("settled", t.settled)
-                tObj.put("isRepayment", t.isRepayment)
-                tObj.put("isLoan", t.isLoan)
-                txnArr.put(tObj)
-            }
+            transactionDao.getForAccountOnce(acc.id)
+                .filter { onlyTransactionIds == null || it.id in onlyTransactionIds }
+                .forEachIndexed { ti, t ->
+                    val key = "a${ai}_t${ti}"
+                    keyForTxnId[t.id] = key
+                    val tObj = org.json.JSONObject()
+                    tObj.put("key", key)
+                    tObj.put("type", t.type.name)
+                    tObj.put("amountMinor", t.amountMinor)
+                    tObj.put("description", t.description)
+                    tObj.put("date", t.date ?: org.json.JSONObject.NULL)
+                    tObj.put("category", t.category ?: org.json.JSONObject.NULL)
+                    tObj.put("settled", t.settled)
+                    tObj.put("isRepayment", t.isRepayment)
+                    tObj.put("isLoan", t.isLoan)
+                    txnArr.put(tObj)
+                }
             accObj.put("transactions", txnArr)
             accountsArr.put(accObj)
         }
+
+        val splitsArr = org.json.JSONArray()
+        for (split in splitDao.getAllOnce()) {
+            val meKey = split.record.meTransactionId?.let { keyForTxnId[it] }
+            val participantKeys = split.participants.map { p -> p.transactionId?.let { keyForTxnId[it] } }
+            if (meKey == null && participantKeys.all { it == null }) continue // nothing of this split is in the export
+            val sObj = org.json.JSONObject()
+            sObj.put("description", split.record.description)
+            sObj.put("totalMinor", split.record.totalMinor)
+            sObj.put("payerName", split.record.payerName)
+            sObj.put("date", split.record.date)
+            sObj.put("meTransactionKey", meKey ?: org.json.JSONObject.NULL)
+            val pArr = org.json.JSONArray()
+            split.participants.forEachIndexed { i, p ->
+                val pObj = org.json.JSONObject()
+                pObj.put("name", p.name)
+                pObj.put("amountMinor", p.amountMinor)
+                pObj.put("isPayer", p.isPayer)
+                pObj.put("recorded", p.recorded)
+                pObj.put("transactionKey", participantKeys[i] ?: org.json.JSONObject.NULL)
+                pArr.put(pObj)
+            }
+            sObj.put("participants", pArr)
+            splitsArr.put(sObj)
+        }
+
+        val allocationsArr = org.json.JSONArray()
+        for (alloc in repaymentAllocationDao.getAllOnce()) {
+            val repKey = keyForTxnId[alloc.repaymentTransactionId] ?: continue
+            val targetKey = keyForTxnId[alloc.targetTransactionId] ?: continue
+            val aObj = org.json.JSONObject()
+            aObj.put("repaymentTransactionKey", repKey)
+            aObj.put("targetTransactionKey", targetKey)
+            aObj.put("allocatedAmountMinor", alloc.allocatedAmountMinor)
+            allocationsArr.put(aObj)
+        }
+
         val root = org.json.JSONObject()
+        root.put("version", 2)
+        root.put("scope", if (accountIds == null) "full" else "account")
         root.put("accounts", accountsArr)
+        root.put("splits", splitsArr)
+        root.put("repaymentAllocations", allocationsArr)
         root.put("exportedAt", System.currentTimeMillis())
         return root.toString(2)
     }
 
-    /** Restores accounts + transactions from a backup produced by [exportAllToJson]. Always creates new accounts (never merges into existing ones), so re-importing is safe. Older backups (pre-repayment feature, or pre-isLoan) simply lack those fields, which default to false — a backup taken before the Loan Given/Loan Taken types were folded into isLoan restores as plain, non-loan transactions. Repayment allocation links themselves aren't part of the backup, so a restored repayment transaction comes back as a plain flagged transaction with its settlements already baked into each loan's "settled" state at export time — nothing is lost balance-wise. Returns the number of accounts restored. */
-    suspend fun importFromJson(json: String): Int {
+    /**
+     * Restores a backup produced by [exportAllToJson] / [exportAccountToJson] — the one importer
+     * behind Home, Settings, and single-account import. An account whose name already exists is
+     * merged into rather than duplicated: each incoming transaction is matched one-to-one against
+     * an existing identical one (type + amount + description + date + loan/repayment flags) and
+     * skipped if found, so restoring the same file twice adds nothing. Skipped transactions still
+     * count as "present", so splits and allocations that reference them relink to the existing
+     * rows. An account's opening balance is never duplicated — if it already has one, the
+     * incoming one is skipped whatever its amount. All-or-nothing.
+     *
+     * Older backups (no version field, no splits, no allocations, no isLoan) still load: missing
+     * pieces simply default, and legacy LOAN_GIVEN/LOAN_TAKEN types map to SPENT/RECEIVED + isLoan
+     * the same way MIGRATION_6_7 does for the database itself.
+     */
+    suspend fun restoreFromBackupJson(json: String): BackupRestoreResult = db.withTransaction {
         val root = org.json.JSONObject(json)
-        val accountsArr = root.optJSONArray("accounts") ?: return 0
-        var count = 0
+        val accountsArr = root.optJSONArray("accounts") ?: return@withTransaction BackupRestoreResult(0, 0, 0, 0, 0)
+        val keyToId = mutableMapOf<String, Long>()
+        var created = 0
+        var merged = 0
+        var added = 0
+        var skipped = 0
+
         for (i in 0 until accountsArr.length()) {
             val accObj = accountsArr.getJSONObject(i)
-            val name = accObj.optString("name")
+            val name = accObj.optString("name").trim()
             if (name.isBlank()) continue
-            val phone = accObj.optString("phoneNumber").takeIf { it.isNotBlank() && it != "null" }
-            val accountId = accountDao.insert(Account(name = name, phoneNumber = phone))
+            val phone = accObj.optNullableString("phoneNumber")
+            val existingAccount = accountDao.findByExactName(name)
+            val accountId = existingAccount?.id ?: accountDao.insert(Account(name = name, phoneNumber = phone))
+            if (existingAccount != null) merged++ else created++
+            val unmatched = if (existingAccount != null) transactionDao.getForAccountOnce(accountId).toMutableList() else mutableListOf()
+
             val txnArr = accObj.optJSONArray("transactions") ?: org.json.JSONArray()
             for (j in 0 until txnArr.length()) {
                 val tObj = txnArr.getJSONObject(j)
                 val rawType = tObj.getString("type")
-                // Old backups (pre-isLoan) may still say "LOAN_GIVEN"/"LOAN_TAKEN" — those values
-                // no longer exist on TransactionType, so map them the same way MIGRATION_6_7 does
-                // for the database itself: SPENT/RECEIVED with isLoan implied true.
                 val legacyIsLoan = rawType == "LOAN_GIVEN" || rawType == "LOAN_TAKEN"
                 val type = when (rawType) {
                     "LOAN_GIVEN" -> TransactionType.SPENT
                     "LOAN_TAKEN" -> TransactionType.RECEIVED
                     else -> runCatching { TransactionType.valueOf(rawType) }.getOrNull() ?: continue
                 }
-                transactionDao.insert(
-                    Transaction(
-                        accountId = accountId,
-                        type = type,
-                        amountMinor = tObj.optLong("amountMinor", 0L),
-                        description = tObj.optString("description", ""),
-                        date = if (tObj.isNull("date")) null else tObj.optLong("date"),
-                        category = if (tObj.isNull("category")) null else tObj.optString("category"),
-                        settled = tObj.optBoolean("settled", false),
-                        isRepayment = tObj.optBoolean("isRepayment", false),
-                        isLoan = tObj.optBoolean("isLoan", legacyIsLoan)
+                val key = tObj.optString("key", "a${i}_t${j}")
+                val amount = tObj.optLong("amountMinor", 0L)
+                val description = tObj.optString("description", "")
+                val date = if (tObj.isNull("date")) null else tObj.optLong("date")
+                val isLoan = tObj.optBoolean("isLoan", legacyIsLoan)
+                val isRepayment = tObj.optBoolean("isRepayment", false)
+
+                val match = unmatched.firstOrNull {
+                    if (type == TransactionType.INITIAL_BALANCE) it.type == TransactionType.INITIAL_BALANCE
+                    else it.type == type && it.amountMinor == amount && it.date == date &&
+                        it.description.equals(description, ignoreCase = true) &&
+                        it.isLoan == isLoan && it.isRepayment == isRepayment
+                }
+                if (match != null) {
+                    unmatched.remove(match)
+                    keyToId[key] = match.id
+                    skipped++
+                } else {
+                    keyToId[key] = transactionDao.insert(
+                        Transaction(
+                            accountId = accountId,
+                            type = type,
+                            amountMinor = amount,
+                            description = description,
+                            date = date,
+                            category = tObj.optNullableString("category"),
+                            settled = tObj.optBoolean("settled", false),
+                            isRepayment = isRepayment,
+                            isLoan = isLoan
+                        )
                     )
+                    added++
+                }
+            }
+        }
+
+        var splitsRestored = 0
+        val existingSplits = splitDao.getAllOnce().map { it.record }
+        val splitsArr = root.optJSONArray("splits") ?: org.json.JSONArray()
+        for (k in 0 until splitsArr.length()) {
+            val sObj = splitsArr.getJSONObject(k)
+            val description = sObj.optString("description", "Split")
+            val totalMinor = sObj.optLong("totalMinor", 0L)
+            val payerName = sObj.optString("payerName", "Me")
+            val date = sObj.optLong("date", 0L)
+            if (existingSplits.any { it.description == description && it.totalMinor == totalMinor && it.payerName == payerName && it.date == date }) continue
+            val splitId = splitDao.insertRecord(
+                SplitRecord(
+                    description = description,
+                    totalMinor = totalMinor,
+                    payerName = payerName,
+                    date = date,
+                    meTransactionId = sObj.optNullableString("meTransactionKey")?.let { keyToId[it] }
+                )
+            )
+            val pArr = sObj.optJSONArray("participants") ?: org.json.JSONArray()
+            val participants = (0 until pArr.length()).map { idx ->
+                val pObj = pArr.getJSONObject(idx)
+                SplitParticipantRecord(
+                    splitId = splitId,
+                    name = pObj.optString("name"),
+                    amountMinor = pObj.optLong("amountMinor", 0L),
+                    isPayer = pObj.optBoolean("isPayer", false),
+                    recorded = pObj.optBoolean("recorded", false),
+                    transactionId = pObj.optNullableString("transactionKey")?.let { keyToId[it] }
                 )
             }
-            count++
+            splitDao.insertParticipants(participants)
+            splitsRestored++
         }
-        return count
+
+        val allocationsArr = root.optJSONArray("repaymentAllocations") ?: org.json.JSONArray()
+        for (k in 0 until allocationsArr.length()) {
+            val aObj = allocationsArr.getJSONObject(k)
+            val repaymentId = aObj.optNullableString("repaymentTransactionKey")?.let { keyToId[it] } ?: continue
+            val targetId = aObj.optNullableString("targetTransactionKey")?.let { keyToId[it] } ?: continue
+            val amount = aObj.optLong("allocatedAmountMinor", 0L)
+            val alreadyThere = repaymentAllocationDao.getForTarget(targetId)
+                .any { it.repaymentTransactionId == repaymentId && it.allocatedAmountMinor == amount }
+            if (!alreadyThere) {
+                repaymentAllocationDao.insert(
+                    RepaymentAllocation(repaymentTransactionId = repaymentId, targetTransactionId = targetId, allocatedAmountMinor = amount)
+                )
+            }
+        }
+
+        BackupRestoreResult(created, merged, added, skipped, splitsRestored)
     }
+
+    /** Kept for existing callers — see [restoreFromBackupJson]. Returns how many accounts were created or merged into. */
+    suspend fun importFromJson(json: String): Int =
+        restoreFromBackupJson(json).let { it.accountsCreated + it.accountsMerged }
 
     /** Looks up an existing account by exact (case-insensitive) name — used before an import creates a new account, so the user can be asked to merge instead of silently duplicating it. */
     suspend fun findAccountByName(name: String): Account? = accountDao.findByExactName(name.trim())
@@ -805,3 +963,19 @@ data class SplitStatusSummary(
     val totalRemainingMinor: Long,
     val overallStatus: SplitOverallStatus
 )
+
+
+/** What [HisaabRepository.restoreFromBackupJson] did, for the confirmation message after an import. */
+data class BackupRestoreResult(
+    val accountsCreated: Int,
+    val accountsMerged: Int,
+    val transactionsAdded: Int,
+    val transactionsSkippedAsDuplicates: Int,
+    val splitsRestored: Int
+) {
+    val accountsTotal: Int get() = accountsCreated + accountsMerged
+}
+
+/** JSON null, a missing key, and a blank string all read as "no value" — `optString` alone would turn a JSON null into the literal text "null". */
+private fun org.json.JSONObject.optNullableString(name: String): String? =
+    if (isNull(name)) null else optString(name).takeIf { it.isNotBlank() }

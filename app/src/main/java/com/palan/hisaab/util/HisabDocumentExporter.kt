@@ -242,5 +242,23 @@ object HisabDocumentExporter {
         context.startActivity(Intent.createChooser(intent, chooserTitle))
     }
 
+    const val XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    /** An Excel file of [transactions] (the whole account, or just a selection) with the account's summary on top — see [HisabExcel]. */
+    fun createXlsx(context: Context, accountName: String, state: AccountUiState, transactions: List<Transaction>): File {
+        val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+        val file = File(dir, "${sanitize(accountName)}_hisab.xlsx")
+        FileOutputStream(file).use { it.write(HisabExcel.toXlsxBytes(state, transactions)) }
+        return file
+    }
+
+    /** Writes already-built backup JSON (see HisaabRepository.exportAccountToJson) to a shareable file. */
+    fun createJsonFile(context: Context, accountName: String, json: String): File {
+        val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+        val file = File(dir, "${sanitize(accountName)}_hisab.json")
+        file.writeText(json)
+        return file
+    }
+
     private fun sanitize(name: String) = name.replace(Regex("[^A-Za-z0-9_-]"), "_")
 }

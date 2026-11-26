@@ -1,7 +1,5 @@
 package com.palan.hisaab.ui.home
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,7 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
@@ -48,11 +46,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -62,12 +58,12 @@ import com.palan.hisaab.data.AccountSummary
 import com.palan.hisaab.data.HisaabRepository
 import com.palan.hisaab.data.SettingsRepository
 import com.palan.hisaab.ui.common.InitialsAvatar
+import com.palan.hisaab.ui.common.rememberDataTransfer
 import com.palan.hisaab.ui.createaccount.CreateAccountDialog
 import com.palan.hisaab.ui.theme.Spacing
 import com.palan.hisaab.util.Money
 import com.palan.hisaab.viewmodel.HomeViewModel
 import com.palan.hisaab.viewmodel.SettingsViewModel
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -87,18 +83,12 @@ fun HomeScreen(
     }
     val settingsViewModel: SettingsViewModel = viewModel(factory = settingsFactory)
     val settings by settingsViewModel.settings.collectAsState()
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
 
     val allSummaries by viewModel.accountSummaries.collectAsState()
     val summaries = if (settings.hideZeroBalanceAccounts) allSummaries.filter { it.balance != 0L } else allSummaries
     val query by viewModel.query.collectAsState()
     var showCreateDialog by remember { mutableStateOf(false) }
-    var showImportDialog by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var pendingImport by remember { mutableStateOf<com.palan.hisaab.util.ParsedHisab?>(null) }
-    var duplicateAccount by remember { mutableStateOf<com.palan.hisaab.data.entity.Account?>(null) }
-    var mergeMessage by remember { mutableStateOf<String?>(null) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -108,22 +98,7 @@ fun HomeScreen(
         selectedIds = emptySet()
     }
 
-    val exportBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) {
-            coroutineScope.launch {
-                val json = repository.exportAllToJson()
-                context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
-            }
-        }
-    }
-    val importBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            coroutineScope.launch {
-                val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-                if (!json.isNullOrBlank()) repository.importFromJson(json)
-            }
-        }
-    }
+    val transfer = rememberDataTransfer(repository, onOpenAccount)
 
     Scaffold(
         topBar = {
@@ -155,16 +130,20 @@ fun HomeScreen(
                                 onClick = { showMenu = false; selectionMode = true }
                             )
                             DropdownMenuItem(
-                                text = { Text("Import Hisab") },
-                                onClick = { showMenu = false; showImportDialog = true }
+                                text = { Text("Import from Text") },
+                                onClick = { showMenu = false; transfer.importFromText() }
                             )
                             DropdownMenuItem(
-                                text = { Text("Export Backup") },
-                                onClick = { showMenu = false; exportBackupLauncher.launch("hisaab_backup.json") }
+                                text = { Text("Import from Excel") },
+                                onClick = { showMenu = false; transfer.importFromExcel() }
                             )
                             DropdownMenuItem(
-                                text = { Text("Import Backup") },
-                                onClick = { showMenu = false; importBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
+                                text = { Text("Import from JSON") },
+                                onClick = { showMenu = false; transfer.importFromJson() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Export Backup (JSON)") },
+                                onClick = { showMenu = false; transfer.exportBackup() }
                             )
                         }
                         IconButton(onClick = onOpenSettings) {
@@ -202,7 +181,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Icon(Icons.Filled.CallSplit, contentDescription = null, modifier = Modifier.padding(end = 6.dp))
+                        Icon(Icons.AutoMirrored.Filled.CallSplit, contentDescription = null, modifier = Modifier.padding(end = 6.dp))
                         Text("Split Expense")
                     }
                     OutlinedButton(
@@ -273,68 +252,7 @@ fun HomeScreen(
         )
     }
 
-    if (showImportDialog) {
-        ImportHisabDialog(
-            onDismiss = { showImportDialog = false },
-            onImport = { parsed ->
-                viewModel.importHisab(
-                    parsed,
-                    onDuplicate = { existing ->
-                        // Found an account with the same name — ask before creating a duplicate.
-                        pendingImport = parsed
-                        duplicateAccount = existing
-                        showImportDialog = false
-                    },
-                    onImported = { newId ->
-                        showImportDialog = false
-                        onOpenAccount(newId)
-                    }
-                )
-            }
-        )
-    }
-
-    val importToResolve = pendingImport
-    val existingMatch = duplicateAccount
-    if (importToResolve != null && existingMatch != null) {
-        AlertDialog(
-            onDismissRequest = { pendingImport = null; duplicateAccount = null },
-            title = { Text("Account already exists") },
-            text = { Text("An account named \"${existingMatch.name}\" already exists.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.mergeHisab(existingMatch.id, importToResolve) { addedCount ->
-                        pendingImport = null
-                        duplicateAccount = null
-                        mergeMessage = if (addedCount == 1) "Added 1 new transaction to ${existingMatch.name}."
-                            else "Added $addedCount new transactions to ${existingMatch.name} (duplicates were skipped)."
-                        onOpenAccount(existingMatch.id)
-                    }
-                }) { Text("Merge with Existing Account") }
-            },
-            dismissButton = {
-                Column {
-                    TextButton(onClick = {
-                        viewModel.importHisabAsNewAccount(importToResolve) { newId ->
-                            pendingImport = null
-                            duplicateAccount = null
-                            onOpenAccount(newId)
-                        }
-                    }) { Text("Create Separate Account") }
-                    TextButton(onClick = { pendingImport = null; duplicateAccount = null }) { Text("Cancel") }
-                }
-            }
-        )
-    }
-
-    mergeMessage?.let { message ->
-        AlertDialog(
-            onDismissRequest = { mergeMessage = null },
-            title = { Text("Merged") },
-            text = { Text(message) },
-            confirmButton = { TextButton(onClick = { mergeMessage = null }) { Text("OK") } }
-        )
-    }
+    transfer.dialogs()
 
     if (showDeleteConfirm) {
         val toDelete = summaries.filter { it.account.id in selectedIds }

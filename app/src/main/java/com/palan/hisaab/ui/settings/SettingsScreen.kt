@@ -39,11 +39,14 @@ import com.palan.hisaab.viewmodel.SettingsViewModel
 @Composable
 fun SettingsScreen(
     settingsRepository: SettingsRepository,
+    repository: com.palan.hisaab.data.HisaabRepository,
+    onOpenAccount: (Long) -> Unit,
     onBack: () -> Unit
 ) {
     val factory = remember { viewModelFactory { initializer { SettingsViewModel(settingsRepository) } } }
     val viewModel: SettingsViewModel = viewModel(factory = factory)
     val settings by viewModel.settings.collectAsState()
+    val transfer = com.palan.hisaab.ui.common.rememberDataTransfer(repository, onOpenAccount)
     val context = LocalContext.current
     val versionName = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "—"
@@ -184,13 +187,29 @@ fun SettingsScreen(
             }
 
             item { HorizontalDivider() }
+            item { SectionHeader("Sharing") }
+            item {
+                SettingRow(
+                    title = "Show WhatsApp in Share",
+                    subtitle = "Adds a direct \"Share via WhatsApp\" option when sharing an account's transactions. The normal Android share sheet is unaffected either way.",
+                    checked = settings.showWhatsAppInShare,
+                    onCheckedChange = viewModel::setShowWhatsAppInShare
+                )
+            }
+
+            item { HorizontalDivider() }
             item { SectionHeader("Backup and Data") }
             item {
-                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                    androidx.compose.material3.TextButton(onClick = transfer.exportBackup) { Text("Export backup (JSON, all accounts)") }
+                    androidx.compose.material3.TextButton(onClick = transfer.importFromJson) { Text("Import from JSON (backup or single account)") }
+                    androidx.compose.material3.TextButton(onClick = transfer.importFromExcel) { Text("Import from Excel") }
+                    androidx.compose.material3.TextButton(onClick = transfer.importFromText) { Text("Import from text") }
                     Text(
-                        "Import Hisab, Export Backup, and Import Backup are on the home screen's ⋮ menu.",
+                        "Single-account export lives in each account's Share menu. JSON keeps splits and settlements intact; Excel and text carry the transaction lines only.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
             }
@@ -210,6 +229,8 @@ fun SettingsScreen(
             item { androidx.compose.foundation.layout.Spacer(Modifier.padding(24.dp)) }
         }
     }
+
+    transfer.dialogs()
 }
 
 @Composable

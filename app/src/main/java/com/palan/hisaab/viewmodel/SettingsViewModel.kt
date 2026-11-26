@@ -56,6 +56,10 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
         viewModelScope.launch { repository.setHideZeroBalanceAccounts(enabled) }
     }
 
+    fun setShowWhatsAppInShare(enabled: Boolean) {
+        viewModelScope.launch { repository.setShowWhatsAppInShare(enabled) }
+    }
+
     fun setAutoFillTodayDate(enabled: Boolean) {
         viewModelScope.launch { repository.setAutoFillTodayDate(enabled) }
     }

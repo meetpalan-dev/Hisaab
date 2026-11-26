@@ -77,4 +77,8 @@ interface RepaymentAllocationDao {
         """
     )
     fun observeAllocatedSumsForAccount(accountId: Long): Flow<List<TargetAllocatedSum>>
+
+    /** Every allocation in the database, for full-backup export — see HisaabRepository.exportAllToJson. */
+    @Query("SELECT * FROM repayment_allocations")
+    suspend fun getAllOnce(): List<RepaymentAllocation>
 }

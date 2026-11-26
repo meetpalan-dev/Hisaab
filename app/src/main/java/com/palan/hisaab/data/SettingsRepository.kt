@@ -29,6 +29,8 @@ data class HisaabSettings(
     val undoEnabled: Boolean = true,
     // Account list
     val hideZeroBalanceAccounts: Boolean = false,
+    // Sharing
+    val showWhatsAppInShare: Boolean = false,
     // Misc (existing)
     val autoFillTodayDate: Boolean = true
 )
@@ -46,6 +48,7 @@ class SettingsRepository(private val context: Context) {
         val CONFIRM_BEFORE_SETTLE = booleanPreferencesKey("confirm_before_settle")
         val UNDO_ENABLED = booleanPreferencesKey("undo_enabled")
         val HIDE_ZERO_BALANCE = booleanPreferencesKey("hide_zero_balance_accounts")
+        val SHOW_WHATSAPP = booleanPreferencesKey("show_whatsapp_in_share")
         val AUTO_FILL_DATE = booleanPreferencesKey("auto_fill_today_date")
     }
 
@@ -61,6 +64,7 @@ class SettingsRepository(private val context: Context) {
             confirmBeforeSettle = prefs[Keys.CONFIRM_BEFORE_SETTLE] ?: false,
             undoEnabled = prefs[Keys.UNDO_ENABLED] ?: true,
             hideZeroBalanceAccounts = prefs[Keys.HIDE_ZERO_BALANCE] ?: false,
+            showWhatsAppInShare = prefs[Keys.SHOW_WHATSAPP] ?: false,
             autoFillTodayDate = prefs[Keys.AUTO_FILL_DATE] ?: true
         )
     }
@@ -103,6 +107,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setHideZeroBalanceAccounts(enabled: Boolean) {
         context.settingsDataStore.edit { it[Keys.HIDE_ZERO_BALANCE] = enabled }
+    }
+
+    suspend fun setShowWhatsAppInShare(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.SHOW_WHATSAPP] = enabled }
     }
 
     suspend fun setAutoFillTodayDate(enabled: Boolean) {

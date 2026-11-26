@@ -80,6 +80,8 @@ private enum class HistoryFilter(val label: String) { ACTIVE("Active"), ALL("All
 
 private enum class SwipeDirection { NONE, SETTLE, RESTORE }
 
+private enum class ShareKind { TEXT, EXCEL, JSON, PDF, IMAGE, WHATSAPP }
+
 /** "August 2026" for a dated transaction, or "No Date" grouped last (the transaction list is already
  * sorted newest-date-first with nulls last, so this groupBy naturally yields months newest-first
  * with "No Date" trailing, matching the monthly-grouping spec). */
@@ -118,6 +120,9 @@ fun AccountScreen(
     var showAccountMenu by remember { mutableStateOf(false) }
     var showDeleteAccountConfirm by remember { mutableStateOf(false) }
     var showShareMenu by remember { mutableStateOf(false) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(setOf<Long>()) }
+    var showSelectionShareMenu by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf(HistoryFilter.ACTIVE) }
 
     // "Settle Hisaab": amount entered -> automatically applied against outstanding hisaab -> confirmation.
@@ -165,10 +170,61 @@ fun AccountScreen(
         HistoryFilter.CLEARED -> SwipeDirection.RESTORE
         HistoryFilter.ALL -> SwipeDirection.NONE
     }
-    val groupedTransactions = remember(visibleTransactions, settings.groupByMonth) {
-        if (settings.groupByMonth) visibleTransactions.groupBy { monthGroupLabel(it.date) }
+    // Month headers carry the select-the-whole-month checkboxes, so grouping is forced on while selecting.
+    val groupedTransactions = remember(visibleTransactions, settings.groupByMonth, selectionMode) {
+        if (settings.groupByMonth || selectionMode) visibleTransactions.groupBy { monthGroupLabel(it.date) }
         else linkedMapOf("" to visibleTransactions)
     }
+
+    fun toggleSelected(id: Long) {
+        selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+    }
+    fun exitSelection() {
+        selectionMode = false
+        selectedIds = emptySet()
+    }
+    androidx.activity.compose.BackHandler(enabled = selectionMode) { exitSelection() }
+
+    fun sendText(text: String, viaWhatsApp: Boolean) {
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        if (!viaWhatsApp) {
+            context.startActivity(Intent.createChooser(send, "Share ${state.accountName} Hisab"))
+            return
+        }
+        val opened = listOf("com.whatsapp", "com.whatsapp.w4b").any { pkg ->
+            runCatching { context.startActivity(Intent(send).apply { setPackage(pkg) }) }.isSuccess
+        }
+        if (!opened) coroutineScope.launch { snackbarHostState.showSnackbar("WhatsApp isn't installed on this device") }
+    }
+
+    /** One entry point for every share format, for the whole account or a selection — [transactions] is whatever should be included. */
+    fun runShare(kind: ShareKind, transactions: List<Transaction>) {
+        val wholeAccount = transactions.size == state.transactions.size
+        val scopedState = if (wholeAccount) state else state.copy(transactions = transactions)
+        val title = "Share ${state.accountName} Hisab"
+        when (kind) {
+            ShareKind.TEXT -> sendText(buildShareText(state, transactions), viaWhatsApp = false)
+            ShareKind.WHATSAPP -> sendText(buildShareText(state, transactions), viaWhatsApp = true)
+            ShareKind.EXCEL -> HisabDocumentExporter.shareFile(
+                context, HisabDocumentExporter.createXlsx(context, state.accountName, state, transactions), HisabDocumentExporter.XLSX_MIME, title
+            )
+            ShareKind.JSON -> coroutineScope.launch {
+                val ids = if (wholeAccount) null else transactions.map { it.id }.toSet()
+                val json = repository.exportAccountToJson(accountId, ids)
+                HisabDocumentExporter.shareFile(context, HisabDocumentExporter.createJsonFile(context, state.accountName, json), "application/json", title)
+            }
+            ShareKind.PDF -> HisabDocumentExporter.shareFile(
+                context, HisabDocumentExporter.createPdf(context, state.accountName, scopedState), "application/pdf", title
+            )
+            ShareKind.IMAGE -> HisabDocumentExporter.shareFiles(
+                context, HisabDocumentExporter.createImages(context, state.accountName, scopedState), "image/png", title
+            )
+        }
+    }
+    val selectedTransactions = state.transactions.filter { it.id in selectedIds }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -282,30 +338,58 @@ fun AccountScreen(
                     groupedTransactions.forEach { (month, txnsInMonth) ->
                         if (month.isNotEmpty()) {
                             item(key = "header_$month") {
-                                Text(
-                                    month,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (selectionMode) {
+                                        val monthIds = txnsInMonth.map { it.id }
+                                        val picked = monthIds.count { it in selectedIds }
+                                        androidx.compose.material3.TriStateCheckbox(
+                                            state = when (picked) {
+                                                0 -> androidx.compose.ui.state.ToggleableState.Off
+                                                monthIds.size -> androidx.compose.ui.state.ToggleableState.On
+                                                else -> androidx.compose.ui.state.ToggleableState.Indeterminate
+                                            },
+                                            onClick = { selectedIds = if (picked == monthIds.size) selectedIds - monthIds.toSet() else selectedIds + monthIds }
+                                        )
+                                    }
+                                    Text(
+                                        month,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                                    )
+                                }
                             }
                         }
                         items(txnsInMonth, key = { it.id }) { txn ->
-                            SwipeableTransactionRow(
-                                transaction = txn,
-                                remainingMinor = state.remainingFor(txn),
-                                isPartiallyPaid = state.isPartiallyPaid(txn),
-                                showCategory = settings.showCategories,
-                                swipeDirection = swipeDirection,
-                                onClick = {
-                                    coroutineScope.launch {
-                                        val split = repository.findSplitForTransaction(txn.id)
-                                        if (split != null) onOpenSplitDetails(split.record.id) else editingTransaction = txn
-                                    }
-                                },
-                                onSwipeAction = { newSettled -> handleQuickSettle(txn, newSettled) }
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (selectionMode) {
+                                    androidx.compose.material3.Checkbox(
+                                        checked = txn.id in selectedIds,
+                                        onCheckedChange = { toggleSelected(txn.id) }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f)) {
+                                    SwipeableTransactionRow(
+                                        transaction = txn,
+                                        remainingMinor = state.remainingFor(txn),
+                                        isPartiallyPaid = state.isPartiallyPaid(txn),
+                                        showCategory = settings.showCategories,
+                                        swipeDirection = if (selectionMode) SwipeDirection.NONE else swipeDirection,
+                                        onClick = {
+                                            if (selectionMode) {
+                                                toggleSelected(txn.id)
+                                            } else {
+                                                coroutineScope.launch {
+                                                    val split = repository.findSplitForTransaction(txn.id)
+                                                    if (split != null) onOpenSplitDetails(split.record.id) else editingTransaction = txn
+                                                }
+                                            }
+                                        },
+                                        onSwipeAction = { newSettled -> handleQuickSettle(txn, newSettled) }
+                                    )
+                                }
+                            }
                         }
                     }
                     item { androidx.compose.foundation.layout.Spacer(Modifier.padding(40.dp)) }
@@ -640,14 +724,18 @@ private fun TransactionRow(
     }
 }
 
-private fun buildShareText(state: AccountUiState): String {
+private fun buildShareText(state: AccountUiState, transactions: List<Transaction> = state.transactions): String {
     val sb = StringBuilder()
     sb.appendLine(state.accountName)
     sb.appendLine()
     sb.appendLine("Initial Balance: ${Money.format(state.initialBalance)}")
     sb.appendLine()
+    if (transactions.size != state.transactions.size) {
+        sb.appendLine("Selection: ${transactions.size} of ${state.transactions.size} transactions")
+        sb.appendLine()
+    }
     sb.appendLine("Transactions:")
-    state.transactions.sortedBy { it.date ?: 0L }.forEach { txn ->
+    transactions.sortedBy { it.date ?: 0L }.forEach { txn ->
         val sign = if ((txn.type == TransactionType.RECEIVED && !txn.isLoan) || (txn.type == TransactionType.SPENT && txn.isLoan)) "+" else "-"
         val dateText = txn.date?.let { Date(it).toDisplayString() } ?: "No date"
         val typeSuffix = when {
@@ -679,4 +767,19 @@ private fun buildShareText(state: AccountUiState): String {
     }
     sb.appendLine("Current Balance: ${Money.format(state.balance)}")
     return sb.toString()
+}
+
+
+/** The share-format items, shared by the whole-account Share menu and the selection Share menu so they can never list different options. */
+@Composable
+private fun ShareMenuItems(
+    showWhatsApp: Boolean,
+    onChoose: (ShareKind) -> Unit
+) {
+    DropdownMenuItem(text = { Text("Share as Text") }, onClick = { onChoose(ShareKind.TEXT) })
+    DropdownMenuItem(text = { Text("Share as Excel") }, onClick = { onChoose(ShareKind.EXCEL) })
+    DropdownMenuItem(text = { Text("Share as JSON") }, onClick = { onChoose(ShareKind.JSON) })
+    DropdownMenuItem(text = { Text("Share as PDF") }, onClick = { onChoose(ShareKind.PDF) })
+    DropdownMenuItem(text = { Text("Share as Image") }, onClick = { onChoose(ShareKind.IMAGE) })
+    if (showWhatsApp) DropdownMenuItem(text = { Text("Share via WhatsApp") }, onClick = { onChoose(ShareKind.WHATSAPP) })
 }
